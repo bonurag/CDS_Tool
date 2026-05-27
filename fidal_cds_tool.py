@@ -17,7 +17,9 @@ app = Flask(__name__)
 # ── TABELLE PUNTEGGI ─────────────────────────────────────────────────────────
 
 def _load_tabella(filename):
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    # In modalità PyInstaller i dati vengono estratti in sys._MEIPASS
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(base, filename)
     if not os.path.exists(path):
         return {}
     with open(path, encoding='utf-8') as f:

@@ -7,3 +7,7 @@ __pycache__/
 app_out.txt
 fidal_response.html
 diag*.py
+
+# PyInstaller build artifacts
+build/
+dist/

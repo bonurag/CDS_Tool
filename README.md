@@ -31,7 +31,7 @@ Per usare una porta diversa: `python fidal_cds_tool.py 8080`
 ### Schermata 1 — Parametri
 
 | Campo | Descrizione |
-|---|---|
+| --- | --- |
 | Anno | Anno sportivo (es. 2026) |
 | Tipo attività | Outdoor (pista/campo) o Indoor |
 | Sesso | Femminile / Maschile |
@@ -68,9 +68,11 @@ Il pulsante **⚡ Calcola Ottimale** blocca solo se esistono risultati per cui n
 Per aggiungere altre categorie: inserire il JSON nella cartella del progetto con la stessa struttura e registrarlo in `_TABELLE` in `fidal_cds_tool.py`.
 
 #### Miglior prestazione `*`
+
 L'asterisco rosso `*` indica la **miglior prestazione** di ogni disciplina nella graduatoria caricata.
 
 #### Analisi Staffette
+
 - Elenca tutte le staffette trovate con i componenti risolti dal nome abbreviato FIDAL
 - Calcola se conviene includerla rispetto alle alternative individuali (delta pt)
 
@@ -82,12 +84,13 @@ L'asterisco rosso `*` indica la **miglior prestazione** di ogni disciplina nella
 - Usa i punteggi da tabella (o manuali) per massimizzare il totale
 
 #### ⬇ Stampa / PDF
+
 Genera una scheda stampabile in formato A4 con tutti i risultati selezionati, punteggi e totale. Si apre una nuova finestra — dal dialogo di stampa del browser scegliere **Salva come PDF**.
 
 #### Selezione manuale
 
 | Indicatore | Significato |
-|---|---|
+| --- | --- |
 | 🟢 Verde | Selezionato |
 | ➕ Bianco | Aggiungibile liberamente |
 | 🟡 Giallo | Ultimo slot disponibile per quell'atleta |
@@ -107,9 +110,26 @@ Il pannello atleti mostra il contatore `X/2` per ogni atleta nella selezione cor
 
 ---
 
+## Distribuzione come eseguibile (.exe)
+
+Per distribuire il tool ad altri utenti **senza richiedere Python installato**, usa PyInstaller:
+
+```bat
+build.bat
+```
+
+Lo script installa automaticamente le dipendenze e produce `dist\FIDAL_CDS_Tool.exe` — un singolo file eseguibile autonomo che include Python, Flask e tutte le librerie. L'utente fa doppio click e il browser si apre automaticamente.
+
+> **Requisiti per la build**: Python 3.8+ e connessione internet (solo per scaricare le dipendenze al primo avvio).
+> Il file `.exe` risultante non richiede Python.
+
+---
+
 ## Struttura del progetto
 
-```
-fidal_cds_tool.py   # Server Flask + frontend HTML/CSS/JS (single file)
-Cadette.json        # Tabella punteggi FIDAL — Cadette (CF)
+```text
+fidal_cds_tool.py      # Server Flask + frontend HTML/CSS/JS (single file)
+Cadette.json           # Tabella punteggi FIDAL — Cadette (CF)
+fidal_cds_tool.spec    # Configurazione PyInstaller per la build .exe
+build.bat              # Script di build Windows
 ```
