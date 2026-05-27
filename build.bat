@@ -19,6 +19,18 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
+:: Aggiungi la cartella Scripts utente al PATH (gestisce installazioni --user non in PATH)
+for /f "delims=" %%i in ('python -c "import sysconfig; print(sysconfig.get_path(\"scripts\",\"nt_user\"))"') do set PATH=%PATH%;%%i
+for /f "delims=" %%i in ('python -c "import sysconfig; print(sysconfig.get_path(\"scripts\"))"') do set PATH=%PATH%;%%i
+
+:: Verifica che pyinstaller sia ora raggiungibile
+where pyinstaller >nul 2>&1
+if errorlevel 1 (
+    echo ERRORE: pyinstaller non trovato anche dopo l'installazione.
+    echo Prova manualmente: pip install pyinstaller
+    pause & exit /b 1
+)
+
 :: Pulizia build precedente
 echo [2/3] Pulizia build precedente...
 if exist dist\FIDAL_CDS_Tool.exe del /q dist\FIDAL_CDS_Tool.exe
