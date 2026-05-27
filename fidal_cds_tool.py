@@ -7,12 +7,147 @@ Poi apri http://localhost:5001
 from flask import Flask, jsonify, request, Response
 import requests
 from bs4 import BeautifulSoup
-import re, sys, threading, time, webbrowser
+import re, sys, threading, time, webbrowser, json, os
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
 
 app = Flask(__name__)
+
+# ── TABELLE PUNTEGGI ─────────────────────────────────────────────────────────
+
+def _load_tabella(filename):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding='utf-8') as f:
+        data = json.load(f)
+    return {g['gara']: {r['tempo'].strip(): r['punteggio']
+                        for r in g.get('risultati', [])}
+            for g in data.get('gare', [])}
+
+_TABELLE = {
+    'CF': _load_tabella('Cadette.json'),
+}
+
+def _match_gara(fidal_name, tabella):
+    """Restituisce la chiave della tabella che corrisponde al nome FIDAL, o None."""
+    fn = fidal_name.strip()
+    fn_low = fn.lower()
+
+    # 1 — Corrispondenza diretta
+    if fn in tabella:
+        return fn
+    for k in tabella:
+        if k.lower() == fn_low:
+            return k
+
+    # 2 — Rimuovi suffisso dopo '/' (es. "Salto in lungo/LJ" → "Salto in lungo")
+    fn_strip = re.sub(r'\s*/\S+.*', '', fn).strip()
+    if fn_strip in tabella:
+        return fn_strip
+    for k in tabella:
+        if k.lower() == fn_strip.lower():
+            return k
+
+    # 3 — Numero iniziale + tipo gara
+    nums = re.findall(r'\d+', fn_low)
+    n0 = nums[0] if nums else None
+    for k in tabella:
+        kl = k.lower()
+        knums = re.findall(r'\d+', kl)
+        kn0 = knums[0] if knums else None
+        if n0 and kn0 and n0 != kn0:
+            continue
+        if 'piani' in fn_low and 'piani' in kl:
+            return k
+        if n0 in ('600', '1000', '1200', '2000') and 'metr' in kl and 'ostac' not in kl:
+            return k
+        if ('hs' in fn_low or 'ostac' in fn_low) and 'ostac' in kl:
+            return k
+        if 'staffetta' in fn_low and 'staffetta' in kl:
+            if nums and knums and nums[-1] == knums[-1]:
+                return k
+
+    # 4 — Keyword per salti e lanci
+    kw_map = [
+        (['lungo'],                  'salto in lungo'),
+        (['triplo'],                 'salto triplo'),
+        (['quadruplo'],              'salto quadruplo'),
+        (['alto'],                   'salto in alto'),
+        (['asta'],                   "salto con l'asta"),
+        (['peso', ' sp'],            'peso'),
+        (['martello', ' ht'],        'martello'),
+        (['giavellotto', ' jt'],     'giavellotto'),
+        (['disco'],                  'disco'),
+        (['marcia'],                 'marcia'),
+    ]
+    for fkws, jkw in kw_map:
+        if any(kw in fn_low for kw in fkws):
+            for k in tabella:
+                if jkw in k.lower():
+                    return k
+    return None
+
+def _parse_perf_s(perf):
+    """Converte una prestazione in float (secondi per corse, metri per campo)."""
+    perf = perf.strip()
+    if ':' in perf:
+        parts = perf.split(':')
+        try:
+            if len(parts) == 2:
+                return float(parts[0]) * 60 + float(parts[1])
+            return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        except ValueError:
+            return None
+    try:
+        return float(perf.replace(',', '.'))
+    except ValueError:
+        return None
+
+def _lookup_pts(fidal_name, perf, categoria):
+    tabella = _TABELLE.get(categoria, {})
+    if not tabella:
+        return 0, False
+    gara_key = _match_gara(fidal_name, tabella)
+    if gara_key is None:
+        return 0, False
+    perf_dict = tabella[gara_key]
+    perf_norm = perf.strip()
+
+    # 1 — Corrispondenza esatta
+    if perf_norm in perf_dict:
+        return perf_dict[perf_norm], True
+
+    # 2 — Fallback numerico: prossima entrata peggiore in tabella
+    perf_val = _parse_perf_s(perf_norm)
+    if perf_val is None:
+        return 0, False
+
+    # Costruisci lista (valore_numerico, punteggio) per tutte le entrate valide
+    numeric = [(v, p) for t, p in perf_dict.items()
+               if (v := _parse_perf_s(t)) is not None]
+    if not numeric:
+        return 0, False
+
+    # Determina direzione: in eventi di corsa valore più basso = punti più alti
+    # (campione: confronta min e max)
+    sorted_n = sorted(numeric, key=lambda x: x[0])
+    is_time = sorted_n[0][1] >= sorted_n[-1][1]  # True → corsa/ostacoli
+
+    if is_time:
+        # Prossima entrata con tempo >= prestazione (bucket peggiore per eccesso)
+        above = [(v, p) for v, p in numeric if v >= perf_val]
+        if above:
+            return min(above, key=lambda x: x[0])[1], True
+    else:
+        # Prossima entrata con misura <= prestazione (bucket peggiore per difetto)
+        below = [(v, p) for v, p in numeric if v <= perf_val]
+        if below:
+            return max(below, key=lambda x: x[0])[1], True
+
+    # Prestazione fuori range tabella → 0 pt confermato (evento trovato, perf troppo lenta/corta)
+    return 0, True
 
 # ── SCRAPER ──────────────────────────────────────────────────────────────────
 
@@ -95,11 +230,16 @@ def api_fetch():
         r.raise_for_status()
         data = parse_graduatorie(r.text)
         if not data:
-            # Debug: salva HTML per diagnosi
             snippet = r.text[:500].replace('\n',' ')
             return jsonify({'ok':False,
                 'error':f'Nessun risultato trovato. Verifica i parametri. '
                         f'(HTML ricevuto: {len(r.text)} byte, snippet: {snippet[:120]}…)'})
+        # Arricchisci con punteggi dalla tabella locale
+        categoria = p.get('categoria', '')
+        for row in data:
+            pts, found = _lookup_pts(row['ev'], row['perf'], categoria)
+            row['pts']    = pts
+            row['pts_ok'] = found
         return jsonify({'ok':True,'data':data,'url':r.url})
     except Exception as e:
         return jsonify({'ok':False,'error':str(e)}), 500
@@ -230,6 +370,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   text-transform:uppercase;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.3);
   color:rgba(255,255,255,.8);padding:.5rem .9rem;border-radius:6px;cursor:pointer}
 .btn-clr:hover{background:rgba(255,255,255,.2)}
+.btn-pdf{font-family:var(--head);font-size:.8rem;font-weight:600;letter-spacing:.04em;
+  text-transform:uppercase;background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.4);
+  color:#fff;padding:.5rem .9rem;border-radius:6px;cursor:pointer;transition:background .15s}
+.btn-pdf:hover{background:rgba(255,255,255,.28)}
 
 /* MAIN LAYOUT */
 .main{padding:1.25rem 2rem;display:grid;gap:1.25rem}
@@ -498,6 +642,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
     <div class="tstat"><span class="val" id="tot-ev">0</span><span class="lbl">Gare</span></div>
     <span class="note-est" id="note-est">Inserisci i punti FIDAL per ogni risultato, poi usa Calcola Ottimale</span>
     <button class="btn-clr" onclick="clearAll()">✕ Svuota</button>
+    <button class="btn-pdf" onclick="printPDF()">⬇ Stampa / PDF</button>
     <button class="btn-opt" onclick="computeOptimal()">⚡ Calcola Ottimale</button>
   </div>
   <div id="calcola-err" style="display:none"></div>
@@ -607,7 +752,7 @@ let sortCol = -1, sortAsc = true;
 
 function isLancio(ev){ return [...LANCIO_EVS].some(k=>ev.toLowerCase().includes(k)); }
 function isSalto(ev){  return [...SALTO_EVS].some(k=>ev.toLowerCase().includes(k)); }
-function pts(r){ return userPts[r.id] !== undefined ? userPts[r.id] : 0; }
+function pts(r){ return userPts[r.id] !== undefined ? userPts[r.id] : r.pts; }
 
 // ── URL PREVIEW ─────────────────────────────────────────
 function updateUrlPreview(){
@@ -870,7 +1015,7 @@ function renderProspetto(){
   }
   tbody.innerHTML=sel.map((r,i)=>{
     const p=pts(r);
-    const pVal=userPts[r.id]!==undefined?userPts[r.id]:'';
+    const pVal=userPts[r.id]!==undefined?userPts[r.id]:(r.pts_ok?r.pts:'');
     const dbl=ec[r.ev]===2?'<span class="dbl-badge">×2</span>':'';
     const best=r.isBest?'<span class="best-mark" title="Miglior prestazione nella disciplina">*</span>':'';
     return `<tr class="selected-row">
@@ -928,7 +1073,7 @@ function renderAll(){
   tbody.innerHTML=filtered.map(r=>{
     const st=rowStatus(r);
     const inSel=selectedIds.has(r.id);
-    const pVal=userPts[r.id]!==undefined?userPts[r.id]:'';
+    const pVal=userPts[r.id]!==undefined?userPts[r.id]:(r.pts_ok?r.pts:'');
     const rowCls=`avail-row row-${st}`;
     const canClick=st!=='block';
     const btnTxt=inSel?'✓ Incluso':'+ Aggiungi';
@@ -1026,7 +1171,7 @@ function setNoteEst(msg, isError=false){
 }
 
 function computeOptimal(){
-  const missing=ALL.filter(r=>userPts[r.id]===undefined||userPts[r.id]===0);
+  const missing=ALL.filter(r=>userPts[r.id]===undefined&&!r.pts_ok);
   if (missing.length>0){
     setNoteEst(`⚠ ${missing.length} risultat${missing.length===1?'o':'i'} senza punteggio — inserisci i punti FIDAL per tutti prima di calcolare.`, true);
     return;
@@ -1090,6 +1235,111 @@ function renderStaffettaAnalysis(){
       </div>
     </div>`;
   }).join('');
+}
+
+// ── STAMPA / PDF ──────────────────────────────────────────
+function printPDF(){
+  const sel=ALL.filter(r=>selectedIds.has(r.id)).sort((a,b)=>pts(b)-pts(a));
+  if (!sel.length){ alert('Nessun risultato selezionato. Seleziona i risultati prima di stampare.'); return; }
+
+  const v=validate();
+  const total=sel.reduce((s,r)=>s+pts(r),0);
+  const title=document.getElementById('tool-title').textContent;
+  const sub=document.getElementById('tool-sub').textContent;
+  const today=new Date().toLocaleDateString('it-IT',{day:'2-digit',month:'2-digit',year:'numeric'});
+
+  const ec={};
+  sel.forEach(r=>ec[r.ev]=(ec[r.ev]||0)+1);
+
+  const rows=sel.map((r,i)=>{
+    const p=pts(r);
+    const athlD=r.isStaffetta?(r.staffAthl||[r.athlete]).join(' / '):r.athlete;
+    const dbl=ec[r.ev]===2?' <span style="background:#fef3c7;color:#92400e;font-size:7pt;padding:1px 4px;border-radius:3px">×2</span>':'';
+    const best=r.isBest?'<span style="color:#c0392b;font-weight:800">*</span> ':'';
+    const typeCols={corsa:'#dbeafe',ostacoli:'#ede9fe',salto:'#d1fae5',lancio:'#fef3c7',staffetta:'#fce7f3'};
+    const typeClr=typeCols[r.type]||'#f0f4f9';
+    return `<tr style="border-bottom:1px solid #e2e8f0;${i%2===0?'':'background:#f8fafc'}">
+      <td style="padding:5px 7px;color:#6b82a0;font-size:8pt;text-align:center">${i+1}</td>
+      <td style="padding:5px 7px"><span style="background:${typeClr};font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:2px 5px;border-radius:3px">${TYPE_LBL[r.type]}</span></td>
+      <td style="padding:5px 7px;font-weight:600;font-size:9pt">${r.ev}${dbl}</td>
+      <td style="padding:5px 7px;font-size:8.5pt">${athlD}</td>
+      <td style="padding:5px 7px;font-family:monospace;font-weight:600;color:#054FAE;font-size:9pt">${best}${r.perf}${r.wind?' <span style="font-size:7pt;color:#999">'+r.wind+'</span>':''}</td>
+      <td style="padding:5px 7px;font-size:8pt;color:#6b82a0">${r.piazz||''}</td>
+      <td style="padding:5px 7px;font-size:8pt;color:#6b82a0">${r.citta||''}</td>
+      <td style="padding:5px 7px;font-family:monospace;font-size:8pt;color:#6b82a0">${r.data||''}</td>
+      <td style="padding:5px 7px;text-align:right;font-family:monospace;font-weight:700;font-size:9.5pt;color:${p>0?'#054FAE':'#999'}">${p||'—'}</td>
+    </tr>`;
+  }).join('');
+
+  const vincoli=`
+    <span style="${v.nSel===13?'color:#1a7f3c':'color:#d46b08'}">● ${v.nSel}/13 risultati</span>
+    &nbsp;&nbsp;
+    <span style="${v.nEv>=10?'color:#1a7f3c':'color:#d46b08'}">● ${v.nEv} gare</span>
+    &nbsp;&nbsp;
+    <span style="${v.nLanci>=2?'color:#1a7f3c':'color:#d46b08'}">● ${v.nLanci}/2 lanci</span>
+    &nbsp;&nbsp;
+    <span style="${v.nSalti>=2?'color:#1a7f3c':'color:#d46b08'}">● ${v.nSalti}/2 salti</span>
+    &nbsp;&nbsp;
+    <span style="${v.evOk&&v.atlOk?'color:#1a7f3c':'color:#c0392b'}">● Vincoli ${v.evOk&&v.atlOk?'OK':'VIOLATI'}</span>`;
+
+  const html=`<!DOCTYPE html>
+<html lang="it"><head>
+<meta charset="UTF-8">
+<title>Scheda CdS — ${title}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Arial',sans-serif;padding:15mm 18mm;color:#0d1f3c;font-size:10pt}
+  @page{size:A4;margin:0}
+  @media print{body{padding:10mm 14mm}}
+</style>
+</head><body>
+
+<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px;border-bottom:3px solid #054FAE;padding-bottom:10px">
+  <div>
+    <div style="font-size:7pt;text-transform:uppercase;letter-spacing:.1em;color:#6b82a0;margin-bottom:3px">Scheda Campionato di Società — Fase Provinciale</div>
+    <div style="font-size:18pt;font-weight:800;color:#054FAE;line-height:1.1">${title}</div>
+    <div style="font-size:10pt;color:#444;margin-top:3px">${sub}</div>
+  </div>
+  <div style="text-align:right;font-size:8pt;color:#6b82a0">
+    <div>Generato il ${today}</div>
+    <div style="margin-top:4px;font-size:7pt">FIDAL CdS Tool</div>
+  </div>
+</div>
+
+<div style="margin-bottom:10px;font-size:8pt">${vincoli}</div>
+
+<table style="width:100%;border-collapse:collapse">
+  <thead>
+    <tr style="background:#054FAE;color:#fff">
+      <th style="padding:6px 7px;text-align:center;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase;width:28px">#</th>
+      <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase;width:70px">Tipo</th>
+      <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase">Disciplina</th>
+      <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase">Atleta/e</th>
+      <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase">Prestazione</th>
+      <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase;width:60px">Piazz.</th>
+      <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase;width:65px">Città</th>
+      <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase;width:45px">Data</th>
+      <th style="padding:6px 7px;text-align:right;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase;width:55px">Punti</th>
+    </tr>
+  </thead>
+  <tbody>${rows}</tbody>
+  <tfoot>
+    <tr style="background:#054FAE;color:#fff">
+      <td colspan="8" style="padding:7px 7px;font-size:9pt;font-weight:700;text-transform:uppercase;letter-spacing:.05em">Totale scheda</td>
+      <td style="padding:7px 7px;text-align:right;font-family:monospace;font-size:13pt;font-weight:800;color:#00C9FF">${total.toLocaleString('it')}</td>
+    </tr>
+  </tfoot>
+</table>
+
+<div style="margin-top:10px;font-size:7pt;color:#999">
+  * = miglior prestazione nella disciplina &nbsp;|&nbsp; ×2 = gara con doppio risultato
+</div>
+
+<script>window.onload=function(){window.print();}<\/script>
+</body></html>`;
+
+  const w=window.open('','_blank','width=900,height=750');
+  w.document.open(); w.document.write(html); w.document.close();
 }
 </script>
 </body>

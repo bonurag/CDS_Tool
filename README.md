@@ -48,11 +48,24 @@ Clicca **⚡ Carica Graduatorie FIDAL** per scaricare i dati.
 
 ### Schermata 2 — Prospetto CdS
 
-#### Punti FIDAL
-I punti **non sono presenti** nelle graduatorie FIDAL e devono essere inseriti manualmente.
-- Inserisci i punti direttamente nella colonna **Pt FIDAL** della tabella risultati
-- I punti si possono inserire anche dopo aver selezionato un risultato nel prospetto
-- Il pulsante **⚡ Calcola Ottimale** richiede che tutti i risultati abbiano un punteggio
+#### Punti FIDAL — lookup automatico da tabella
+
+I punti vengono cercati automaticamente nella tabella ufficiale FIDAL (file JSON nella stessa cartella).
+
+- **Trovato in tabella**: il campo viene pre-compilato con il valore esatto
+- **Valore non esatto in tabella**: si usa il bucket immediatamente peggiore (approssimazione per eccesso per i tempi, per difetto per misure e lanci) — metodo ufficiale FIDAL
+- **Fuori range**: la prestazione è sotto la soglia minima della tabella → punti = 0
+- **Override manuale**: il campo punti è sempre editabile per correggere o inserire manualmente
+
+Il pulsante **⚡ Calcola Ottimale** blocca solo se esistono risultati per cui non è disponibile né un valore da tabella né un inserimento manuale.
+
+#### Tabelle punteggi disponibili
+
+| File             | Categoria             | Note                      |
+| ---------------- | --------------------- | ------------------------- |
+| `Cadette.json`   | CF — Cadette Femmine  | 23 gare, lookup completo  |
+
+Per aggiungere altre categorie: inserire il JSON nella cartella del progetto con la stessa struttura e registrarlo in `_TABELLE` in `fidal_cds_tool.py`.
 
 #### Miglior prestazione `*`
 L'asterisco rosso `*` indica la **miglior prestazione** di ogni disciplina nella graduatoria caricata.
@@ -62,21 +75,25 @@ L'asterisco rosso `*` indica la **miglior prestazione** di ogni disciplina nella
 - Calcola se conviene includerla rispetto alle alternative individuali (delta pt)
 
 #### ⚡ Calcola Ottimale
-- Ricerca combinatoria esatta su tutte le combinazioni possibili (141 K+)
+
+- Ricerca combinatoria esatta su tutte le combinazioni possibili
 - Testa tutti i sottoinsiemi di staffette (2ⁿ)
 - Garantisce il rispetto di tutti i vincoli regolamentari
-- **Richiede** che tutti i punteggi siano stati inseriti prima di partire
+- Usa i punteggi da tabella (o manuali) per massimizzare il totale
+
+#### ⬇ Stampa / PDF
+Genera una scheda stampabile in formato A4 con tutti i risultati selezionati, punteggi e totale. Si apre una nuova finestra — dal dialogo di stampa del browser scegliere **Salva come PDF**.
 
 #### Selezione manuale
 
-| Colore riga | Significato |
+| Indicatore | Significato |
 |---|---|
 | 🟢 Verde | Selezionato |
 | ➕ Bianco | Aggiungibile liberamente |
 | 🟡 Giallo | Ultimo slot disponibile per quell'atleta |
 | 🔴 Rosso | Bloccato (atleta esaurito o gara piena) |
 
-Il pannello atleti in cima alla tabella mostra il contatore `X/2` per ogni atleta selezionato.
+Il pannello atleti mostra il contatore `X/2` per ogni atleta nella selezione corrente.
 
 ---
 
@@ -94,4 +111,5 @@ Il pannello atleti in cima alla tabella mostra il contatore `X/2` per ogni atlet
 
 ```
 fidal_cds_tool.py   # Server Flask + frontend HTML/CSS/JS (single file)
+Cadette.json        # Tabella punteggi FIDAL — Cadette (CF)
 ```
