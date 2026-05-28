@@ -616,7 +616,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 
         <div class="form-group">
           <label>Sesso</label>
-          <select id="f-sesso">
+          <select id="f-sesso" onchange="updateCatOptions()">
             <option value="F">Femminile</option>
             <option value="M">Maschile</option>
           </select>
@@ -624,18 +624,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 
         <div class="form-group">
           <label>Categoria</label>
-          <select id="f-cat">
-            <option value="CF">Cadette (CF)</option>
-            <option value="CM">Cadetti (CM)</option>
-            <option value="AF">Allieve (AF)</option>
-            <option value="AM">Allievi (AM)</option>
-            <option value="JF">Juniores F (JF)</option>
-            <option value="JM">Juniores M (JM)</option>
-            <option value="PF">Promesse F (PF)</option>
-            <option value="PM">Promesse M (PM)</option>
-            <option value="SF">Senior F (SF)</option>
-            <option value="SM">Senior M (SM)</option>
-          </select>
+          <select id="f-cat"><!-- popolato da updateCatOptions() --></select>
         </div>
 
         <div class="form-group">
@@ -926,6 +915,22 @@ function isSalto(ev){  return [...SALTO_EVS].some(k=>ev.toLowerCase().includes(k
 function pts(r){ return userPts[r.id] !== undefined ? userPts[r.id] : r.pts; }
 function activeAll(){ return ALL.filter(r=>!excludedEvs.has(r.ev)); }
 
+// ── CATEGORIA PICKLIST ──────────────────────────────────
+const CATS={
+  F:[{v:'RF',l:'Ragazze (RF)'},{v:'CF',l:'Cadette (CF)'},{v:'AF',l:'Allieve (AF)'},
+     {v:'JF',l:'Juniores F (JF)'},{v:'PF',l:'Promesse F (PF)'},{v:'SF',l:'Senior F (SF)'}],
+  M:[{v:'RM',l:'Ragazzi (RM)'},{v:'CM',l:'Cadetti (CM)'},{v:'AM',l:'Allievi (AM)'},
+     {v:'JM',l:'Juniores M (JM)'},{v:'PM',l:'Promesse M (PM)'},{v:'SM',l:'Senior M (SM)'}],
+};
+function updateCatOptions(){
+  const sesso=document.getElementById('f-sesso').value;
+  const sel=document.getElementById('f-cat');
+  const prev=sel.value;
+  sel.innerHTML=CATS[sesso].map(c=>`<option value="${c.v}">${c.l}</option>`).join('');
+  if ([...sel.options].some(o=>o.value===prev)) sel.value=prev;
+  updateUrlPreview();
+}
+
 // ── URL PREVIEW ─────────────────────────────────────────
 function updateUrlPreview(){
   const p = getFormParams();
@@ -936,7 +941,7 @@ function updateUrlPreview(){
 ['f-anno','f-tipo','f-sesso','f-cat','f-reg','f-naz','f-vento','f-limite','f-societa']
   .forEach(id => document.getElementById(id).addEventListener('change', updateUrlPreview));
 document.getElementById('f-societa').addEventListener('input', updateUrlPreview);
-updateUrlPreview();
+updateCatOptions(); // popola la picklist categorie al caricamento
 
 function getFormParams(){
   return {
