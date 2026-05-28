@@ -494,8 +494,14 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 .athl-link:hover{color:var(--blue2);border-bottom-color:var(--blue2)}
 .best-mark{color:#c0392b;font-weight:800;font-size:.85rem;margin-right:.15rem;vertical-align:baseline}
 #calcola-err{background:#fdf0f0;border-bottom:2px solid var(--red);padding:.9rem 2rem;
-  text-align:center;font-family:var(--head);font-size:1.15rem;font-weight:700;
+  font-family:var(--head);font-size:1.05rem;font-weight:700;
   color:var(--red);letter-spacing:.02em}
+.opt-diag{margin-top:.55rem;font-size:.82rem;font-weight:400;letter-spacing:0;
+  border-top:1px solid rgba(192,57,43,.2);padding-top:.45rem;display:flex;
+  flex-direction:column;gap:.22rem}
+.opt-diag-row{display:flex;gap:.5rem;align-items:baseline}
+.opt-diag-row .diag-ico{font-size:.85rem;flex-shrink:0}
+.opt-diag-row .diag-ev{color:rgba(192,57,43,.75);font-size:.76rem;margin-left:.3rem}
 .pts-inp{font-family:var(--mono);font-size:.82rem;font-weight:600;width:70px;
   border:1.5px solid var(--border);border-radius:4px;padding:.18rem .38rem;
   text-align:right;color:var(--blue);background:transparent;outline:none}
@@ -1756,14 +1762,42 @@ function searchOptimal(inclStaff){
   return {total:best,sel:bestSel};
 }
 
+function buildOptDiagnostic(){
+  const C=getC();
+  const all=activeAll();
+  const allEvs=[...new Set(all.map(r=>r.ev))];
+  const indEvs=[...new Set(all.filter(r=>!r.isStaffetta).map(r=>r.ev))];
+  const nDblNeeded=C.nSel-C.minEv;
+  const dblEvs=allEvs.filter(ev=>all.filter(r=>r.ev===ev).length>=2);
+  const lanciEvs=indEvs.filter(ev=>isLancio(ev));
+  const saltiEvs=indEvs.filter(ev=>isSalto(ev));
+
+  function row(ok, label, evList, needed, have){
+    const ico=ok?'✅':'❌';
+    const cnt=`<strong>${have}/${needed}</strong>`;
+    const evStr=evList.length?`<span class="diag-ev">${evList.join(' · ')}</span>`:'';
+    const miss=!ok?` — mancano ${needed-have}`:'';
+    return `<div class="opt-diag-row"><span class="diag-ico">${ico}</span>${label}: ${cnt}${miss}${evStr}</div>`;
+  }
+
+  return `<div class="opt-diag">`+
+    row(allEvs.length>=C.minEv,   'Gare disponibili', [], C.minEv, allEvs.length)+
+    row(lanciEvs.length>=C.minLanci, 'Lanci', lanciEvs, C.minLanci, lanciEvs.length)+
+    row(saltiEvs.length>=C.minSalti, 'Salti', saltiEvs, C.minSalti, saltiEvs.length)+
+    row(dblEvs.length>=nDblNeeded,
+        `Gare con ≥2 risultati (per ${nDblNeeded} doppiata${nDblNeeded===1?'':'e'})`,
+        dblEvs, nDblNeeded, dblEvs.length)+
+    `</div>`;
+}
+
 function setNoteEst(msg, isError=false){
   const errBanner=document.getElementById('calcola-err');
   if (isError){
-    errBanner.textContent=msg;
+    errBanner.innerHTML=msg;
     errBanner.style.display='block';
   } else {
     errBanner.style.display='none';
-    errBanner.textContent='';
+    errBanner.innerHTML='';
   }
 }
 
@@ -1806,7 +1840,7 @@ function computeOptimal(){
       selectedIds.clear();
       if (!bestSel){
         const C=getC();
-        setNoteEst(`⚠ Impossibile trovare ${C.nSel} risultati con ≥${C.minEv} gare e tutti i vincoli soddisfatti. Assicurati di avere risultati in almeno ${C.minEv} gare diverse (inclusi ≥${C.minLanci} lanci e ≥${C.minSalti} salti distinti).`, true);
+        setNoteEst(`⚠ Impossibile trovare ${C.nSel} risultati con ≥${C.minEv} gare e tutti i vincoli soddisfatti.`+buildOptDiagnostic(), true);
       } else {
         setNoteEst('');
         bestSel.forEach(r=>selectedIds.add(r.id));
