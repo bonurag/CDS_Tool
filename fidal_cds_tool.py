@@ -809,6 +809,16 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
               <input id="m-pts" type="number" min="0" placeholder="(lascia vuoto per inserire dopo)">
             </div>
           </div>
+          <div class="mfg2">
+            <div class="fg-sm">
+              <label>Città</label>
+              <input id="m-citta" placeholder="es. Brescia">
+            </div>
+            <div class="fg-sm">
+              <label>Data</label>
+              <input id="m-data" placeholder="es. 15/05/2026">
+            </div>
+          </div>
           <button class="btn-mok" onclick="submitManual()">✔ Aggiungi</button>
           <button class="btn-mcancel" onclick="toggleManualForm()">Annulla</button>
           <span id="manual-err" style="color:var(--red);font-size:.8rem;margin-left:.75rem"></span>
@@ -1249,11 +1259,14 @@ function submitManual(){
   const pts_num=ptsVal!==''?+ptsVal:0;
   const pts_ok=ptsVal!=='';
 
+  const citta=(document.getElementById('m-citta').value||'').trim();
+  const data=(document.getElementById('m-data').value||'').trim();
+
   const r={
     id: manualIdCounter++,
     ev, type: tipo,
     athlete: isStaff ? (staffAthl.join(' / ')) : athlRaw,
-    athlete_url:'', perf, wind:'', piazz:'', citta:'', data:'', anno:'',
+    athlete_url:'', perf, wind:'', piazz:'', citta, data, anno:'',
     pts: pts_num, pts_ok,
     isStaffetta: isStaff,
     rawStaff: isStaff ? athlRaw : '',
@@ -1278,6 +1291,8 @@ function submitManual(){
   document.getElementById('m-perf').value='';
   document.getElementById('m-athl').value='';
   document.getElementById('m-pts').value='';
+  document.getElementById('m-citta').value='';
+  document.getElementById('m-data').value='';
   document.getElementById('m-ev').focus();
 }
 
