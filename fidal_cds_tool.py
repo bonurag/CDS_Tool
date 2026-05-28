@@ -477,6 +477,33 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   color:var(--muted);display:flex;gap:1.25rem;flex-wrap:wrap}
 .grand-total{font-family:var(--mono);font-size:1.05rem;font-weight:600;color:var(--blue)}
 
+/* MANUAL ENTRY */
+.manual-bar{padding:.55rem 1rem;border-top:1px solid var(--border);background:#fafbfd;
+  display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}
+.btn-add-manual{font-family:var(--head);font-size:.78rem;font-weight:700;letter-spacing:.04em;
+  text-transform:uppercase;background:transparent;border:1.5px dashed var(--blue);
+  color:var(--blue);padding:.3rem .85rem;border-radius:6px;cursor:pointer;transition:all .15s}
+.btn-add-manual:hover{background:var(--blue);color:#fff}
+.manual-form-box{padding:.85rem 1.1rem;background:#f5f8fd;border-top:1px solid var(--border)}
+.mfg{display:grid;grid-template-columns:2fr 1fr 1fr;gap:.6rem;margin-bottom:.55rem}
+.mfg2{display:grid;grid-template-columns:2fr 1fr;gap:.6rem;margin-bottom:.65rem}
+.fg-sm{display:flex;flex-direction:column;gap:.22rem}
+.fg-sm label{font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.fg-sm input,.fg-sm select{font-family:var(--body);font-size:.82rem;border:1.5px solid var(--border);
+  border-radius:5px;padding:.3rem .55rem;background:#fff;color:var(--text);outline:none;
+  transition:border-color .15s}
+.fg-sm input:focus,.fg-sm select:focus{border-color:var(--blue)}
+.btn-mok{font-family:var(--head);font-size:.8rem;font-weight:700;letter-spacing:.04em;
+  text-transform:uppercase;background:var(--green);color:#fff;border:none;
+  padding:.38rem .9rem;border-radius:5px;cursor:pointer;transition:opacity .15s}
+.btn-mok:hover{opacity:.85}
+.btn-mcancel{font-family:var(--head);font-size:.78rem;font-weight:600;background:transparent;
+  border:1px solid var(--border);color:var(--muted);padding:.38rem .8rem;border-radius:5px;
+  cursor:pointer;margin-left:.4rem}
+.manual-badge{font-size:.6rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+  background:#fff3cd;color:#856404;border:1px solid #ffc107;padding:.07rem .35rem;
+  border-radius:3px;margin-left:.35rem;vertical-align:middle}
+
 @media(max-width:680px){
   .form-grid{grid-template-columns:1fr}
   .form-group.span2{grid-column:1}
@@ -744,6 +771,50 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
           <tbody id="all-body"></tbody>
         </table>
       </div>
+      <!-- Manual entry bar -->
+      <div class="manual-bar">
+        <button class="btn-add-manual" onclick="toggleManualForm()">➕ Aggiungi risultato manuale</button>
+        <span style="font-size:.72rem;color:var(--muted)">per staffette non presenti o gare mancanti</span>
+      </div>
+      <div id="manual-form" style="display:none">
+        <div class="manual-form-box">
+          <div class="mfg">
+            <div class="fg-sm">
+              <label>Gara *</label>
+              <input id="m-ev" list="m-ev-list" placeholder="es. Staffetta 4×100" oninput="onManualEvInput()">
+              <datalist id="m-ev-list"></datalist>
+            </div>
+            <div class="fg-sm">
+              <label>Tipo</label>
+              <select id="m-tipo">
+                <option value="corsa">Corsa</option>
+                <option value="ostacoli">Ostacoli</option>
+                <option value="salto">Salto</option>
+                <option value="lancio">Lancio</option>
+                <option value="staffetta">Staffetta</option>
+              </select>
+            </div>
+            <div class="fg-sm">
+              <label>Prestazione *</label>
+              <input id="m-perf" placeholder="es. 48.50 o 1:52.30">
+            </div>
+          </div>
+          <div class="mfg2">
+            <div class="fg-sm">
+              <label>Atleta/e * <span style="font-weight:400;text-transform:none">(staffetta: nomi separati da virgola)</span></label>
+              <input id="m-athl" placeholder="es. ROSSI L., BIANCHI M., VERDI G., NERI A.">
+            </div>
+            <div class="fg-sm">
+              <label>Punti FIDAL</label>
+              <input id="m-pts" type="number" min="0" placeholder="(lascia vuoto per inserire dopo)">
+            </div>
+          </div>
+          <button class="btn-mok" onclick="submitManual()">✔ Aggiungi</button>
+          <button class="btn-mcancel" onclick="toggleManualForm()">Annulla</button>
+          <span id="manual-err" style="color:var(--red);font-size:.8rem;margin-left:.75rem"></span>
+        </div>
+      </div>
+
       <div class="legenda">
         <span>⚠ Max 2 risultati per gara (staffetta esclusa)</span>
         <span>⚠ Ogni atleta max 2 volte (staffetta conta come 1)</span>
@@ -1103,10 +1174,13 @@ function renderAll(){
     const btnTxt=inSel?'✓ Incluso':'+ Aggiungi';
     const btnCls='add-btn'+(inSel?' sel':'');
     const best=r.isBest?'<span class="best-mark" title="Miglior prestazione nella disciplina">*</span>':'';
+    const manualBadge=r.isManual?'<span class="manual-badge">manuale</span>':'';
+    const delManual=r.isManual?`<button class="del-btn" title="Rimuovi risultato manuale"
+      onclick="event.stopPropagation();removeManual(${r.id})" style="margin-left:.25rem">🗑</button>`:'';
     return `<tr class="${rowCls}" ${canClick?`onclick="toggleSelect(${r.id})" title="${statusTitle(st,r)}"`:''}>
       <td style="text-align:center">${statusIcon(st)}</td>
       <td><span class="etype ${r.type}">${TYPE_LBL[r.type]}</span></td>
-      <td style="font-weight:600;white-space:nowrap;font-size:.8rem">${r.ev}</td>
+      <td style="font-weight:600;white-space:nowrap;font-size:.8rem">${r.ev}${manualBadge}</td>
       <td style="font-size:.78rem" onclick="event.stopPropagation()">${athleteDisplay(r)}</td>
       <td class="perf">${best}${r.perf}</td>
       <td style="color:var(--muted);font-size:.72rem">${r.wind||'—'}</td>
@@ -1118,10 +1192,103 @@ function renderAll(){
           title="Inserisci punti FIDAL"
           onchange="userPts[${r.id}]=this.value!==''?+this.value:undefined;updateConstraints();renderProspetto();">
       </td>
-      <td><button class="${btnCls}" ${st==='block'?'disabled':''} title="${statusTitle(st,r)}"
-        onclick="event.stopPropagation();toggleSelect(${r.id})">${btnTxt}</button></td>
+      <td onclick="event.stopPropagation()">
+        <button class="${btnCls}" ${st==='block'?'disabled':''} title="${statusTitle(st,r)}"
+          onclick="toggleSelect(${r.id})">${btnTxt}</button>${delManual}
+      </td>
     </tr>`;
   }).join('');
+}
+
+// ── INSERIMENTO MANUALE ───────────────────────────────────
+let manualIdCounter = 100000;
+
+function detectType(evName){
+  const n=evName.toLowerCase();
+  if (/staffetta|[34]x\d+|\dx\d/.test(n)) return 'staffetta';
+  if (/\bhs\b|ostacoli|siepi/.test(n))     return 'ostacoli';
+  if (/lungo|triplo|alto|asta|salto/.test(n)) return 'salto';
+  if (/peso|martello|giavellotto|disco|lancio/.test(n)) return 'lancio';
+  return 'corsa';
+}
+
+function onManualEvInput(){
+  const ev=document.getElementById('m-ev').value;
+  document.getElementById('m-tipo').value=detectType(ev);
+}
+
+function toggleManualForm(){
+  const f=document.getElementById('manual-form');
+  const visible=f.style.display!=='none';
+  f.style.display=visible?'none':'';
+  if (!visible){
+    // Popola datalist con le gare esistenti
+    const dl=document.getElementById('m-ev-list');
+    dl.innerHTML=[...new Set(ALL.map(r=>r.ev))].sort((a,b)=>a.localeCompare(b,'it'))
+      .map(e=>`<option value="${e}">`).join('');
+    document.getElementById('m-ev').focus();
+    document.getElementById('manual-err').textContent='';
+  }
+}
+
+function submitManual(){
+  const ev=(document.getElementById('m-ev').value||'').trim();
+  const tipo=document.getElementById('m-tipo').value;
+  const perf=(document.getElementById('m-perf').value||'').trim();
+  const athlRaw=(document.getElementById('m-athl').value||'').trim();
+  const ptsVal=document.getElementById('m-pts').value;
+  const errEl=document.getElementById('manual-err');
+  errEl.textContent='';
+
+  if (!ev)     { errEl.textContent='⚠ Inserisci il nome della gara.'; return; }
+  if (!perf)   { errEl.textContent='⚠ Inserisci la prestazione.'; return; }
+  if (!athlRaw){ errEl.textContent='⚠ Inserisci almeno un/una atleta.'; return; }
+
+  const isStaff=(tipo==='staffetta');
+  const staffAthl=isStaff ? athlRaw.split(/[,;\/]/).map(s=>s.trim()).filter(Boolean) : null;
+  const pts_num=ptsVal!==''?+ptsVal:0;
+  const pts_ok=ptsVal!=='';
+
+  const r={
+    id: manualIdCounter++,
+    ev, type: tipo,
+    athlete: isStaff ? (staffAthl.join(' / ')) : athlRaw,
+    athlete_url:'', perf, wind:'', piazz:'', citta:'', data:'', anno:'',
+    pts: pts_num, pts_ok,
+    isStaffetta: isStaff,
+    rawStaff: isStaff ? athlRaw : '',
+    staffAthl: isStaff ? staffAthl : undefined,
+    isManual: true,
+  };
+
+  ALL.push(r);
+  computeBests();
+  buildEvFilterPanel();
+
+  // Aggiorna filtro discipline
+  const evSel=document.getElementById('f-ev-filter');
+  if (![...evSel.options].some(o=>o.value===ev)){
+    const o=document.createElement('option'); o.value=ev; o.textContent=ev; evSel.appendChild(o);
+  }
+
+  renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+
+  // Reset form (mantieni aperto per aggiungerne altri)
+  document.getElementById('m-ev').value='';
+  document.getElementById('m-perf').value='';
+  document.getElementById('m-athl').value='';
+  document.getElementById('m-pts').value='';
+  document.getElementById('m-ev').focus();
+}
+
+function removeManual(id){
+  const idx=ALL.findIndex(r=>r.id===id&&r.isManual);
+  if (idx<0) return;
+  ALL.splice(idx,1);
+  selectedIds.delete(id);
+  computeBests();
+  buildEvFilterPanel();
+  renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
 }
 
 // ── FILTRO GARE CDS ───────────────────────────────────────
