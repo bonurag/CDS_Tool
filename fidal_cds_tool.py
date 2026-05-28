@@ -939,6 +939,16 @@ const CDS_PROGRAMS = {
 };
 CDS_PROGRAMS.RF = CDS_PROGRAMS.RM; // stesso programma tecnico dei Ragazzi
 
+// ── VINCOLI PER CATEGORIA ────────────────────────────────
+// nSel: risultati totali | minEv: gare minime distinte
+// minLanci/minSalti: discipline obbligatorie | maxAthlInd: max gare individuali per atleta
+const CONSTRAINTS = {
+  default: { nSel:13, minEv:10, minLanci:2, minSalti:2, maxAthlInd:2 },
+  RM:      { nSel:8,  minEv:6,  minLanci:1, minSalti:1, maxAthlInd:1 },
+  RF:      { nSel:8,  minEv:6,  minLanci:1, minSalti:1, maxAthlInd:1 },
+};
+function getC(){ return CONSTRAINTS[currentCategoria] || CONSTRAINTS.default; }
+
 // ── STATO ───────────────────────────────────────────────
 let ALL = [], selectedIds = new Set(), userPts = {}, staffAnalysis = [], excludedEvs = new Set(), topCombinations = [];
 let currentCategoria = '', savedManualEntries = [];
@@ -1124,12 +1134,14 @@ function resolveStaffettaAthletes(rawStr){
 
 // ── VALIDATION ───────────────────────────────────────────
 function validate(){
+  const C = getC();
   const sel = ALL.filter(r=>selectedIds.has(r.id));
-  const evCount={}, atlCount={}, lancioSet=new Set(), saltoSet=new Set();
+  const evCount={}, atlCount={}, atlIndCount={}, lancioSet=new Set(), saltoSet=new Set();
   sel.forEach(r=>{
     if (!r.isStaffetta) evCount[r.ev]=(evCount[r.ev]||0)+1;
     const athls = r.isStaffetta ? r.staffAthl : [r.athlete];
     athls.forEach(a=>atlCount[a]=(atlCount[a]||0)+1);
+    if (!r.isStaffetta) athls.forEach(a=>atlIndCount[a]=(atlIndCount[a]||0)+1);
     if (r.type==='lancio'||isLancio(r.ev)) lancioSet.add(r.ev);
     if (r.type==='salto' ||isSalto(r.ev))  saltoSet.add(r.ev);
   });
@@ -1137,26 +1149,31 @@ function validate(){
   return {
     nSel:sel.length, nEv, nLanci:lancioSet.size, nSalti:saltoSet.size,
     evOk: Object.values(evCount).every(v=>v<=2),
-    atlOk: Object.values(atlCount).every(v=>v<=2),
-    sel, evCount, atlCount
+    atlOk: Object.values(atlCount).every(v=>v<=2) &&
+           Object.values(atlIndCount).every(v=>v<=C.maxAthlInd),
+    sel, evCount, atlCount, atlIndCount
   };
 }
 
 // ── STATUS PER RIGA (per colori nella tabella) ───────────
 function rowStatus(r){
+  const C = getC();
   const v = validate();
   const inSel = selectedIds.has(r.id);
   if (inSel) return 'sel';
 
-  // Atleti coinvolti
   const athls = r.isStaffetta ? (r.staffAthl||[]) : [r.athlete];
-  const atlBlocked = athls.some(a=>(v.atlCount[a]||0)>=2);
+  const atlBlocked = r.isStaffetta
+    ? athls.some(a=>(v.atlCount[a]||0)>=2)
+    : athls.some(a=>(v.atlIndCount[a]||0)>=C.maxAthlInd || (v.atlCount[a]||0)>=2);
   const evBlocked  = !r.isStaffetta && (v.evCount[r.ev]||0)>=2;
-  const atLimit    = v.nSel >= 13;
+  const atLimit    = v.nSel >= C.nSel;
 
   if (atlBlocked || evBlocked || atLimit) return 'block';
-  // warn se atleta è già usato 1 volta (ultimo slot)
-  if (athls.some(a=>(v.atlCount[a]||0)===1)) return 'warn';
+  // warn se atleta è all'ultimo slot individuale disponibile
+  const warnInd = !r.isStaffetta && athls.some(a=>(v.atlIndCount[a]||0)===C.maxAthlInd-1);
+  const warnTot = athls.some(a=>(v.atlCount[a]||0)===1 && !warnInd);
+  if (warnInd || warnTot) return 'warn';
   return 'free';
 }
 
@@ -1164,13 +1181,16 @@ function statusIcon(s){
   return {sel:'✅',free:'➕',warn:'🟡',block:'🔴'}[s]||'';
 }
 function statusTitle(s,r){
+  const C = getC();
   if (s==='sel') return 'Clicca per rimuovere';
   if (s==='block'){
     const v=validate();
     const athls=r.isStaffetta?(r.staffAthl||[]):[r.athlete];
+    if (!r.isStaffetta && athls.some(a=>(v.atlIndCount[a]||0)>=C.maxAthlInd))
+      return `🔴 Atleta già in ${C.maxAthlInd} gara${C.maxAthlInd>1?'':'individuale'}`;
     if (athls.some(a=>(v.atlCount[a]||0)>=2)) return '🔴 Atleta già selezionata 2 volte';
     if (!r.isStaffetta&&(v.evCount[r.ev]||0)>=2) return '🔴 Gara già con 2 risultati';
-    if (v.nSel>=13) return '🔴 Già 13 risultati selezionati';
+    if (v.nSel>=C.nSel) return `🔴 Già ${C.nSel} risultati selezionati`;
     return '🔴 Non aggiungibile';
   }
   if (s==='warn'){
@@ -1190,9 +1210,13 @@ function toggleSelect(id){
   if (selectedIds.has(id)){
     selectedIds.delete(id);
   } else {
+    const C = getC();
     const v = validate();
     const athls = r.isStaffetta ? (r.staffAthl||[]) : [r.athlete];
-    if (v.nSel>=13){ alert('Hai già 13 risultati. Rimuovine uno prima.'); return; }
+    if (v.nSel>=C.nSel){ alert(`Hai già ${C.nSel} risultati. Rimuovine uno prima.`); return; }
+    if (!r.isStaffetta && athls.some(a=>(v.atlIndCount[a]||0)>=C.maxAthlInd)){
+      alert(`⚠ Atleta già in ${C.maxAthlInd} gara${C.maxAthlInd>1?' individuale':''}!`); return;
+    }
     if (athls.some(a=>(v.atlCount[a]||0)>=2)){ alert('⚠ Atleta già presente 2 volte!'); return; }
     if (!r.isStaffetta && (v.evCount[r.ev]||0)>=2){ alert('⚠ Gara già con 2 risultati!'); return; }
     selectedIds.add(id);
@@ -1210,21 +1234,17 @@ function show(id){ document.querySelectorAll('.screen').forEach(s=>s.classList.r
 
 // ── RENDER CONSTRAINTS ────────────────────────────────────
 function updateConstraints(){
+  const C=getC();
   const v=validate();
-  function cbox(id,ok,warn,txt){
-    const el=document.getElementById(id);
-    el.className='cbox '+(ok?'ok':warn?'warn':'err');
-    document.getElementById(id.replace('c-','c-')+'-t').textContent=txt;
-  }
-  // fix id pattern
-  document.getElementById('c-n-t').textContent=`${v.nSel}/13 risultati`;
-  document.getElementById('c-n').className='cbox '+(v.nSel===13?'ok':v.nSel>0?'warn':'err');
-  document.getElementById('c-ev-t').textContent=`${v.nEv}/10 gare (${Math.max(0,13-v.nEv)} doppiate)`;
-  document.getElementById('c-ev').className='cbox '+(v.nEv>=10?'ok':v.nEv>=7?'warn':'err');
-  document.getElementById('c-la-t').textContent=`${v.nLanci}/2 lanci`;
-  document.getElementById('c-la').className='cbox '+(v.nLanci>=2?'ok':v.nLanci===1?'warn':'err');
-  document.getElementById('c-sa-t').textContent=`${v.nSalti}/2 salti`;
-  document.getElementById('c-sa').className='cbox '+(v.nSalti>=2?'ok':v.nSalti===1?'warn':'err');
+  const nDbl=Math.max(0,C.nSel-v.nEv);
+  document.getElementById('c-n-t').textContent=`${v.nSel}/${C.nSel} risultati`;
+  document.getElementById('c-n').className='cbox '+(v.nSel===C.nSel?'ok':v.nSel>0?'warn':'err');
+  document.getElementById('c-ev-t').textContent=`${v.nEv}/${C.minEv} gare (${nDbl} doppiate)`;
+  document.getElementById('c-ev').className='cbox '+(v.nEv>=C.minEv?'ok':v.nEv>=Math.ceil(C.minEv*.7)?'warn':'err');
+  document.getElementById('c-la-t').textContent=`${v.nLanci}/${C.minLanci} lanci`;
+  document.getElementById('c-la').className='cbox '+(v.nLanci>=C.minLanci?'ok':v.nLanci>0?'warn':'err');
+  document.getElementById('c-sa-t').textContent=`${v.nSalti}/${C.minSalti} salti`;
+  document.getElementById('c-sa').className='cbox '+(v.nSalti>=C.minSalti?'ok':v.nSalti>0?'warn':'err');
   document.getElementById('c-at-t').textContent=v.evOk&&v.atlOk?'Vincoli OK':'⚠ Violazione!';
   document.getElementById('c-at').className='cbox '+(v.evOk&&v.atlOk?'ok':'err');
 
@@ -1242,9 +1262,13 @@ function renderAthleteTracker(){
   const v=validate();
   const tracker=document.getElementById('atl-tracker');
   if (!Object.keys(v.atlCount).length){ tracker.innerHTML=''; return; }
+  const C=getC();
   tracker.innerHTML = Object.entries(v.atlCount).sort((a,b)=>b[1]-a[1]).map(([a,c])=>{
-    const cls = c>=2?'full':c===1?'half':'free';
-    return `<span class="atl-chip ${cls}">${a} <span class="atl-cnt">${c}/2</span></span>`;
+    const indC=v.atlIndCount[a]||0;
+    const full=c>=2||indC>=C.maxAthlInd;
+    const cls = full?'full':c===1?'half':'free';
+    const label=C.maxAthlInd===1?`${indC}/1 ind`:`${indC}/${C.maxAthlInd} ind`;
+    return `<span class="atl-chip ${cls}">${a} <span class="atl-cnt">${label}</span></span>`;
   }).join('');
 }
 
@@ -1584,20 +1608,26 @@ function* combIter(arr, k){
   }
 }
 
-function isValidSelCaps(sel, evCap){
-  const evUsed={}, ac={};
+function isValidSelCaps(sel, evCap, maxAthlInd=2){
+  const evUsed={}, acTotal={}, acInd={};
   for (const r of sel){
     if (!r.isStaffetta){
       evUsed[r.ev]=(evUsed[r.ev]||0)+1;
       if (evUsed[r.ev]>(evCap[r.ev]||1)) return false;
     }
     const athls=r.isStaffetta?(r.staffAthl||[r.athlete]):[r.athlete];
-    for (const a of athls){ ac[a]=(ac[a]||0)+1; if (ac[a]>2) return false; }
+    for (const a of athls){
+      acTotal[a]=(acTotal[a]||0)+1;
+      if (!r.isStaffetta) acInd[a]=(acInd[a]||0)+1;
+      if (acTotal[a]>2) return false;
+      if (acInd[a]>maxAthlInd) return false;
+    }
   }
   return true;
 }
 
 function assignBest(evSub, dblSet, inclStaff){
+  const C=getC();
   const evCap={};
   for (const ev of evSub) evCap[ev]=dblSet.has(ev)?2:1;
   const staffEvs=new Set(inclStaff.map(r=>r.ev));
@@ -1609,22 +1639,22 @@ function assignBest(evSub, dblSet, inclStaff){
   cands.sort((a,b)=>pts(b)-pts(a));
 
   // Greedy: prenota atleti staffetta, poi riempi in ordine di punteggio
-  const sel=[],ac={},evUsed={};
+  const sel=[],acTotal={},acInd={},evUsed={};
   inclStaff.filter(r=>evSub.includes(r.ev)).forEach(st=>{
     sel.push(st); evUsed[st.ev]=(evUsed[st.ev]||0)+1;
-    (st.staffAthl||[]).forEach(a=>ac[a]=(ac[a]||0)+1);
+    (st.staffAthl||[]).forEach(a=>acTotal[a]=(acTotal[a]||0)+1);
   });
   for (const r of cands){
     const ev=r.ev;
     if ((evUsed[ev]||0)>=(evCap[ev]||1)) continue;
-    if ((ac[r.athlete]||0)>=2) continue;
-    sel.push(r); ac[r.athlete]=(ac[r.athlete]||0)+1; evUsed[ev]=(evUsed[ev]||0)+1;
+    if ((acTotal[r.athlete]||0)>=2) continue;
+    if ((acInd[r.athlete]||0)>=C.maxAthlInd) continue;
+    sel.push(r);
+    acTotal[r.athlete]=(acTotal[r.athlete]||0)+1;
+    acInd[r.athlete]=(acInd[r.athlete]||0)+1;
+    evUsed[ev]=(evUsed[ev]||0)+1;
   }
 
-  // Local search: prova a sostituire il risultato con il punteggio più basso
-  // con uno non selezionato ma più alto, rispettando tutti i vincoli.
-  // Gestisce il caso in cui il greedy "congeli" un'atleta su una gara
-  // impedendole di contribuire meglio altrove.
   let swapped=true;
   while (swapped){
     swapped=false;
@@ -1635,7 +1665,7 @@ function assignBest(evSub, dblSet, inclStaff){
         if (sel.some(s=>s.id===r.id)) continue;
         if (pts(r)<=pts(r2)) break;
         const candidate=[...sel]; candidate[idx]=r;
-        if (isValidSelCaps(candidate, evCap)){ sel[idx]=r; swapped=true; break; }
+        if (isValidSelCaps(candidate, evCap, C.maxAthlInd)){ sel[idx]=r; swapped=true; break; }
       }
       if (swapped) break;
     }
@@ -1645,21 +1675,22 @@ function assignBest(evSub, dblSet, inclStaff){
 }
 
 function searchOptimal(inclStaff){
+  const C=getC();
   const staffEvs=new Set(inclStaff.map(r=>r.ev));
   const evList=[...new Set(activeAll().filter(r=>!r.isStaffetta||staffEvs.has(r.ev)).map(r=>r.ev))];
   const dbl=evList.filter(ev=>activeAll().filter(r=>r.ev===ev).length>=2);
   let best=-1,bestSel=null;
-  for (let nEv=10;nEv<=Math.min(13,evList.length);nEv++){
-    const nD=13-nEv;
+  for (let nEv=C.minEv;nEv<=Math.min(C.nSel,evList.length);nEv++){
+    const nD=C.nSel-nEv;
     for (const evSub of combIter(evList,nEv)){
       let nl=0,ns=0;
       for (const ev of evSub){if(isLancio(ev))nl++;if(isSalto(ev))ns++;}
-      if (nl<2||ns<2) continue;
+      if (nl<C.minLanci||ns<C.minSalti) continue;
       const dc=evSub.filter(ev=>dbl.includes(ev));
       if (dc.length<nD) continue;
       for (const de of combIter(dc,nD)){
         const {sel,total}=assignBest(evSub,new Set(de),inclStaff);
-        if (sel.length===13&&total>best){best=total;bestSel=sel;}
+        if (sel.length===C.nSel&&total>best){best=total;bestSel=sel;}
       }
     }
   }
@@ -1715,7 +1746,8 @@ function computeOptimal(){
 
       selectedIds.clear();
       if (!bestSel){
-        setNoteEst('⚠ Impossibile trovare 13 risultati con ≥10 gare e tutti i vincoli soddisfatti. Assicurati di avere risultati in almeno 10 gare diverse (inclusi ≥2 lanci e ≥2 salti distinti).', true);
+        const C=getC();
+        setNoteEst(`⚠ Impossibile trovare ${C.nSel} risultati con ≥${C.minEv} gare e tutti i vincoli soddisfatti. Assicurati di avere risultati in almeno ${C.minEv} gare diverse (inclusi ≥${C.minLanci} lanci e ≥${C.minSalti} salti distinti).`, true);
       } else {
         setNoteEst('');
         bestSel.forEach(r=>selectedIds.add(r.id));
