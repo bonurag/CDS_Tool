@@ -1,7 +1,7 @@
 # FIDAL CdS Tool — Scheda Provinciale
 
 Strumento web per la composizione ottimale della scheda di una società al **Campionato di Società** FIDAL (fase provinciale).
-Scarica le graduatorie direttamente dalla banca dati FIDAL e aiuta a scegliere i 13 risultati migliori rispettando tutti i vincoli regolamentari.
+Scarica le graduatorie direttamente dalla banca dati FIDAL e aiuta a scegliere i migliori risultati rispettando tutti i vincoli regolamentari, per categoria.
 
 ---
 
@@ -35,7 +35,7 @@ Per usare una porta diversa: `python fidal_cds_tool.py 8080`
 | Anno | Anno sportivo (es. 2026) |
 | Tipo attività | Outdoor (pista/campo) o Indoor |
 | Sesso | Femminile / Maschile |
-| Categoria | CF, CM, AF, AM, JF, JM, PF, PM, SF, SM |
+| Categoria | CF, CM, RF, RM, AF, AM, JF, JM, PF, PM, SF, SM |
 | Regione | Regione FIDAL di riferimento |
 | Nazionalità | Filtro atleti (default: tutti) |
 | Vento | Filtro vento (default: tutti) |
@@ -48,28 +48,26 @@ Clicca **⚡ Carica Graduatorie FIDAL** per scaricare i dati.
 
 ### Schermata 2 — Prospetto CdS
 
+#### Preset programma CdS
+
+Il pannello filtro gare include pulsanti preset per le categorie con programma tecnico definito (RM, RF, CM, CF). Il preset esclude automaticamente le discipline fuori dal programma ufficiale CdS; il pulsante **Reset** ripristina tutte le gare.
+
 #### Punti FIDAL — lookup automatico da tabella
 
 I punti vengono cercati automaticamente nella tabella ufficiale FIDAL (file JSON nella stessa cartella).
 
 - **Trovato in tabella**: il campo viene pre-compilato con il valore esatto
 - **Valore non esatto in tabella**: si usa il bucket immediatamente peggiore (approssimazione per eccesso per i tempi, per difetto per misure e lanci) — metodo ufficiale FIDAL
-- **Fuori range**: la prestazione è sotto la soglia minima della tabella → punti = 0
-- **Override manuale**: il campo punti è sempre editabile per correggere o inserire manualmente
-
-Il pulsante **⚡ Calcola Ottimale** blocca solo se esistono risultati per cui non è disponibile né un valore da tabella né un inserimento manuale.
-
-#### Tabelle punteggi disponibili
-
-| File             | Categoria             | Note                      |
-| ---------------- | --------------------- | ------------------------- |
-| `Cadette.json`   | CF — Cadette Femmine  | 23 gare, lookup completo  |
-
-Per aggiungere altre categorie: inserire il JSON nella cartella del progetto con la stessa struttura e registrarlo in `_TABELLE` in `fidal_cds_tool.py`.
+- **Fuori range**: la prestazione è sotto la soglia minima → punti = 0
+- **Override manuale**: il campo punti è sempre editabile
 
 #### Miglior prestazione `*`
 
 L'asterisco rosso `*` indica la **miglior prestazione** di ogni disciplina nella graduatoria caricata.
+
+#### Risultati a parità di punteggio
+
+Quando due o più risultati non selezionati hanno lo stesso punteggio di un risultato selezionato nella stessa gara, vengono mostrati in un pannello giallo con un pulsante di scambio diretto (swap con un click).
 
 #### Analisi Staffette
 
@@ -80,12 +78,9 @@ L'asterisco rosso `*` indica la **miglior prestazione** di ogni disciplina nella
 
 - Ricerca combinatoria esatta su tutte le combinazioni possibili
 - Testa tutti i sottoinsiemi di staffette (2ⁿ)
-- Garantisce il rispetto di tutti i vincoli regolamentari
+- Garantisce il rispetto di tutti i vincoli regolamentari per la categoria
 - Usa i punteggi da tabella (o manuali) per massimizzare il totale
-
-#### ⬇ Stampa / PDF
-
-Genera una scheda stampabile in formato A4 con tutti i risultati selezionati, punteggi e totale. Si apre una nuova finestra — dal dialogo di stampa del browser scegliere **Salva come PDF**.
+- In caso di fallimento mostra un **pannello diagnostico** con i vincoli non soddisfatti e le gare disponibili
 
 #### Selezione manuale
 
@@ -96,17 +91,46 @@ Genera una scheda stampabile in formato A4 con tutti i risultati selezionati, pu
 | 🟡 Giallo | Ultimo slot disponibile per quell'atleta |
 | 🔴 Rosso | Bloccato (atleta esaurito o gara piena) |
 
-Il pannello atleti mostra il contatore `X/2` per ogni atleta nella selezione corrente.
+Il pannello atleti mostra il contatore per ogni atleta nella selezione corrente.
+
+L'eventuale banner di errore dell'ottimizzatore si azzera automaticamente appena la selezione manuale soddisfa tutti i vincoli.
+
+#### ⬇ Stampa / PDF
+
+Genera una scheda stampabile in formato A4 con tutti i risultati selezionati, punteggi e totale. Si apre una nuova finestra — dal dialogo di stampa del browser scegliere **Salva come PDF**.
 
 ---
 
-## Regole implementate (Fase Provinciale)
+## Regole implementate per categoria
 
-- **13 risultati** totali nella scheda (art. c)
-- **≥ 10 gare diverse** → massimo 3 gare "doppiate" (art. c)
-- **Obbligatori**: almeno 2 lanci di discipline diverse + almeno 2 salti di discipline diverse (art. c)
-- **Max 2 risultati** per gara individuale (staffetta esclusa) (art. c)
-- **Ogni atleta max 2 volte**: 2 individuali, oppure 1 individuale + 1 staffetta (art. a)
+### Cadette / Cadetti (CF / CM)
+
+- **13 risultati** totali nella scheda
+- **≥ 10 gare diverse** → massimo 3 gare "doppiate"
+- **Obbligatori**: ≥ 2 lanci di discipline diverse + ≥ 2 salti di discipline diverse
+- **Max 2 risultati** per gara individuale (staffetta esclusa)
+- **Ogni atleta max 2 volte**: 2 individuali, oppure 1 individuale + 1 staffetta
+
+### Ragazze / Ragazzi (RF / RM)
+
+- **8 risultati** totali nella scheda
+- **≥ 6 gare diverse** → massimo 2 gare "doppiate"
+- **Obbligatori**: ≥ 1 lancio + ≥ 1 salto di discipline diverse
+- **Max 2 risultati** per gara individuale (staffetta esclusa)
+- **Ogni atleta max 1 volta individualmente** (+ eventuale staffetta)
+
+---
+
+## Tabelle punteggi disponibili
+
+| File | Categoria | Gare |
+| --- | --- | --- |
+| `Cadette.json` | CF — Cadette Femmine | 23 |
+| `Cadetti.json` | CM — Cadetti Maschi | 22 |
+| `Ragazze.json` | RF — Ragazze | 20 |
+| `Ragazzi.json` | RM — Ragazzi | 20 |
+
+Per aggiungere altre categorie: inserire il JSON nella cartella del progetto con la stessa struttura e registrarlo in `_TABELLE` in `fidal_cds_tool.py`.
 
 ---
 
@@ -118,7 +142,7 @@ Per distribuire il tool ad altri utenti **senza richiedere Python installato**, 
 build.bat
 ```
 
-Lo script installa automaticamente le dipendenze e produce `dist\FIDAL_CDS_Tool.exe` — un singolo file eseguibile autonomo che include Python, Flask e tutte le librerie. L'utente fa doppio click e il browser si apre automaticamente.
+Lo script installa automaticamente le dipendenze e produce `dist\FIDAL_CDS_Tool.exe` — un singolo file eseguibile autonomo che include Python, Flask e tutte le librerie. I file JSON delle tabelle punteggi sono incorporati nel bundle.
 
 > **Requisiti per la build**: Python 3.8+ e connessione internet (solo per scaricare le dipendenze al primo avvio).
 > Il file `.exe` risultante non richiede Python.
@@ -130,6 +154,9 @@ Lo script installa automaticamente le dipendenze e produce `dist\FIDAL_CDS_Tool.
 ```text
 fidal_cds_tool.py      # Server Flask + frontend HTML/CSS/JS (single file)
 Cadette.json           # Tabella punteggi FIDAL — Cadette (CF)
+Cadetti.json           # Tabella punteggi FIDAL — Cadetti (CM)
+Ragazze.json           # Tabella punteggi FIDAL — Ragazze (RF)
+Ragazzi.json           # Tabella punteggi FIDAL — Ragazzi (RM)
 fidal_cds_tool.spec    # Configurazione PyInstaller per la build .exe
 build.bat              # Script di build Windows
 ```

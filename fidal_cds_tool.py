@@ -1278,6 +1278,10 @@ function updateConstraints(){
   document.getElementById('tag-tot').textContent=`Tot. ${total.toLocaleString('it')} pt`;
   document.getElementById('grand-total').textContent=total.toLocaleString('it');
   document.getElementById('sel-n').textContent=v.nSel;
+
+  // Auto-clear stale optimizer error when selection is fully valid
+  const allOk = v.nSel===C.nSel && v.nEv>=C.minEv && v.nLanci>=C.minLanci && v.nSalti>=C.minSalti && v.evOk && v.atlOk;
+  if (allOk) setNoteEst('');
 }
 
 // ── RENDER ATHLETE TRACKER ────────────────────────────────
@@ -1819,10 +1823,11 @@ function computeOptimal(){
       topCombinations=[];
 
       // Tutti i sottoinsiemi di staffette (2^n)
+      const C=getC();
       for (let mask=0;mask<(1<<n);mask++){
         const incl=allStaff.filter((_,i)=>mask&(1<<i));
         const {total,sel}=searchOptimal(incl);
-        if (sel&&sel.length===13){
+        if (sel&&sel.length===C.nSel){
           const inclLabel=incl.length?incl.map(r=>r.ev).join(' + '):'nessuna staffetta';
           topCombinations.push({total,sel:[...sel],inclStaff:inclLabel});
           if (total>bestTotal){bestTotal=total;bestSel=sel;}
