@@ -910,8 +910,16 @@ function athleteDisplay(r, short=false){
 }
 let sortCol = -1, sortAsc = true;
 
-function isLancio(ev){ return [...LANCIO_EVS].some(k=>ev.toLowerCase().includes(k)); }
-function isSalto(ev){  return [...SALTO_EVS].some(k=>ev.toLowerCase().includes(k)); }
+function isLancio(ev){
+  const r=activeAll().find(x=>x.ev===ev);
+  if (r && r.type) return r.type==='lancio';
+  return [...LANCIO_EVS].some(k=>ev.toLowerCase().includes(k));
+}
+function isSalto(ev){
+  const r=activeAll().find(x=>x.ev===ev);
+  if (r && r.type) return r.type==='salto';
+  return [...SALTO_EVS].some(k=>ev.toLowerCase().includes(k));
+}
 function pts(r){ return userPts[r.id] !== undefined ? userPts[r.id] : r.pts; }
 function activeAll(){ return ALL.filter(r=>!excludedEvs.has(r.ev)); }
 
@@ -1046,18 +1054,30 @@ function computeBests(){
 
 // ── NAME RESOLUTION (staffette) ─────────────────────────
 function resolveStaffettaAthletes(rawStr){
-  const parts = rawStr.split(/[,\/]/).map(s=>s.trim());
-  const indiv = ALL.filter(r=>!r.isStaffetta);
+  // FIDAL usa sia "COGNOME N. / COGNOME N." che "cognome-cognome-cognome"
+  const byCS = rawStr.split(/[,\/]/).map(s=>s.trim()).filter(Boolean);
+  const parts = byCS.length > 1 ? byCS : rawStr.split('-').map(s=>s.trim()).filter(Boolean);
+  const indiv = activeAll().filter(r=>!r.isStaffetta);
   return parts.map(part=>{
     const cleaned = part.replace(/\s+[A-Z]{2}\s*$/, '').trim();
+    // Pattern "COGNOME I." o "COGNOME I"
     const m = cleaned.match(/^([A-Z][A-Z'\-]+(?:\s+[A-Z][A-Z'\-]+)*)\s+([A-Z])\.?$/i);
-    if (!m) return cleaned;
-    const [,sur,ini] = m;
-    const found = indiv.find(r=>{
-      const w=r.athlete.split(/\s+/);
-      return w[0].toUpperCase()===sur.toUpperCase() && w.length>1 && w[1][0].toUpperCase()===ini.toUpperCase();
-    });
-    return found ? found.athlete : `${sur.toUpperCase()} ${ini.toUpperCase()}.`;
+    if (m) {
+      const [,sur,ini] = m;
+      const found = indiv.find(r=>{
+        const w=r.athlete.split(/\s+/);
+        return w[0].toUpperCase()===sur.toUpperCase() && w.length>1 && w[1][0].toUpperCase()===ini.toUpperCase();
+      });
+      if (found) return found.athlete;
+      return `${sur.toUpperCase()} ${ini.toUpperCase()}.`;
+    }
+    // Fallback: solo cognome (formato FIDAL dash)
+    const surOnly = cleaned.toUpperCase().trim();
+    if (!/\s/.test(surOnly) && surOnly.length > 1) {
+      const found = indiv.find(r => r.athlete.split(/\s+/)[0].toUpperCase() === surOnly);
+      if (found) return found.athlete;
+    }
+    return cleaned || null;
   }).filter(Boolean);
 }
 
@@ -1069,8 +1089,8 @@ function validate(){
     if (!r.isStaffetta) evCount[r.ev]=(evCount[r.ev]||0)+1;
     const athls = r.isStaffetta ? r.staffAthl : [r.athlete];
     athls.forEach(a=>atlCount[a]=(atlCount[a]||0)+1);
-    if (isLancio(r.ev)) lancioSet.add(r.ev);
-    if (isSalto(r.ev))  saltoSet.add(r.ev);
+    if (r.type==='lancio'||isLancio(r.ev)) lancioSet.add(r.ev);
+    if (r.type==='salto' ||isSalto(r.ev))  saltoSet.add(r.ev);
   });
   const nEv = Object.keys(evCount).length + (sel.some(r=>r.isStaffetta)?1:0);
   return {
@@ -1559,7 +1579,7 @@ function assignBest(evSub, dblSet, inclStaff){
 function searchOptimal(inclStaff){
   const staffEvs=new Set(inclStaff.map(r=>r.ev));
   const evList=[...new Set(activeAll().filter(r=>!r.isStaffetta||staffEvs.has(r.ev)).map(r=>r.ev))];
-  const dbl=evList.filter(ev=>ALL.filter(r=>r.ev===ev).length>=2);
+  const dbl=evList.filter(ev=>activeAll().filter(r=>r.ev===ev).length>=2);
   let best=-1,bestSel=null;
   for (let nEv=10;nEv<=Math.min(13,evList.length);nEv++){
     const nD=13-nEv;
@@ -1626,7 +1646,12 @@ function computeOptimal(){
       }
 
       selectedIds.clear();
-      if (bestSel) bestSel.forEach(r=>selectedIds.add(r.id));
+      if (!bestSel){
+        setNoteEst('⚠ Impossibile trovare 13 risultati con ≥10 gare e tutti i vincoli soddisfatti. Assicurati di avere risultati in almeno 10 gare diverse (inclusi ≥2 lanci e ≥2 salti distinti).', true);
+      } else {
+        setNoteEst('');
+        bestSel.forEach(r=>selectedIds.add(r.id));
+      }
       renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
       renderStaffettaAnalysis();
     } finally {
