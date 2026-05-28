@@ -662,6 +662,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
     <div class="tstat"><span class="val" id="tot-ev">0</span><span class="lbl">Gare</span></div>
     <span class="note-est" id="note-est">Inserisci i punti FIDAL per ogni risultato, poi usa Calcola Ottimale</span>
     <button class="btn-clr" onclick="clearAll()">✕ Svuota</button>
+    <button class="btn-pdf" onclick="downloadCSV()">⬇ CSV</button>
     <button class="btn-pdf" onclick="printPDF()">⬇ Stampa / PDF</button>
     <button class="btn-opt" onclick="computeOptimal()">⚡ Calcola Ottimale</button>
   </div>
@@ -760,7 +761,7 @@ const SALTO_EVS  = new Set(['lungo','triplo','alto','asta','salto']);
 const TYPE_LBL   = {corsa:'Corsa',ostacoli:'Ostacoli',salto:'Salto',lancio:'Lancio',staffetta:'Staffetta'};
 
 // ── STATO ───────────────────────────────────────────────
-let ALL = [], selectedIds = new Set(), userPts = {}, staffAnalysis = [], excludedEvs = new Set();
+let ALL = [], selectedIds = new Set(), userPts = {}, staffAnalysis = [], excludedEvs = new Set(), topCombinations = [];
 
 function athleteDisplay(r, short=false){
   if (r.isStaffetta) return (r.staffAthl||[r.athlete]).join(' / ');
@@ -978,7 +979,7 @@ function toggleSelect(id){
   renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
 }
 
-function clearAll(){ selectedIds.clear(); staffAnalysis=[];
+function clearAll(){ selectedIds.clear(); staffAnalysis=[]; topCombinations=[];
   renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
   document.getElementById('staff-cards').innerHTML=''; }
 
@@ -1166,6 +1167,19 @@ function* combIter(arr, k){
   }
 }
 
+function isValidSelCaps(sel, evCap){
+  const evUsed={}, ac={};
+  for (const r of sel){
+    if (!r.isStaffetta){
+      evUsed[r.ev]=(evUsed[r.ev]||0)+1;
+      if (evUsed[r.ev]>(evCap[r.ev]||1)) return false;
+    }
+    const athls=r.isStaffetta?(r.staffAthl||[r.athlete]):[r.athlete];
+    for (const a of athls){ ac[a]=(ac[a]||0)+1; if (ac[a]>2) return false; }
+  }
+  return true;
+}
+
 function assignBest(evSub, dblSet, inclStaff){
   const evCap={};
   for (const ev of evSub) evCap[ev]=dblSet.has(ev)?2:1;
@@ -1176,6 +1190,8 @@ function assignBest(evSub, dblSet, inclStaff){
     activeAll().filter(r=>r.ev===ev&&!r.isStaffetta).forEach(r=>cands.push(r));
   }
   cands.sort((a,b)=>pts(b)-pts(a));
+
+  // Greedy: prenota atleti staffetta, poi riempi in ordine di punteggio
   const sel=[],ac={},evUsed={};
   inclStaff.filter(r=>evSub.includes(r.ev)).forEach(st=>{
     sel.push(st); evUsed[st.ev]=(evUsed[st.ev]||0)+1;
@@ -1187,6 +1203,27 @@ function assignBest(evSub, dblSet, inclStaff){
     if ((ac[r.athlete]||0)>=2) continue;
     sel.push(r); ac[r.athlete]=(ac[r.athlete]||0)+1; evUsed[ev]=(evUsed[ev]||0)+1;
   }
+
+  // Local search: prova a sostituire il risultato con il punteggio più basso
+  // con uno non selezionato ma più alto, rispettando tutti i vincoli.
+  // Gestisce il caso in cui il greedy "congeli" un'atleta su una gara
+  // impedendole di contribuire meglio altrove.
+  let swapped=true;
+  while (swapped){
+    swapped=false;
+    const indivSel=sel.filter(s=>!s.isStaffetta).sort((a,b)=>pts(a)-pts(b));
+    for (const r2 of indivSel){
+      const idx=sel.indexOf(r2);
+      for (const r of cands){
+        if (sel.some(s=>s.id===r.id)) continue;
+        if (pts(r)<=pts(r2)) break;
+        const candidate=[...sel]; candidate[idx]=r;
+        if (isValidSelCaps(candidate, evCap)){ sel[idx]=r; swapped=true; break; }
+      }
+      if (swapped) break;
+    }
+  }
+
   return {sel, total:sel.reduce((s,r)=>s+pts(r),0)};
 }
 
@@ -1237,13 +1274,19 @@ function computeOptimal(){
       const n=allStaff.length;
       let bestTotal=-1,bestSel=null;
       staffAnalysis=[];
+      topCombinations=[];
 
       // Tutti i sottoinsiemi di staffette (2^n)
       for (let mask=0;mask<(1<<n);mask++){
         const incl=allStaff.filter((_,i)=>mask&(1<<i));
         const {total,sel}=searchOptimal(incl);
-        if (sel&&sel.length===13&&total>bestTotal){bestTotal=total;bestSel=sel;}
+        if (sel&&sel.length===13){
+          const inclLabel=incl.length?incl.map(r=>r.ev).join(' + '):'nessuna staffetta';
+          topCombinations.push({total,sel:[...sel],inclStaff:inclLabel});
+          if (total>bestTotal){bestTotal=total;bestSel=sel;}
+        }
       }
+      topCombinations.sort((a,b)=>b.total-a.total);
 
       // Analisi per ogni staffetta: con vs senza
       for (const st of allStaff){
@@ -1288,6 +1331,28 @@ function renderStaffettaAnalysis(){
       </div>
     </div>`;
   }).join('');
+}
+
+// ── CSV EXPORT ────────────────────────────────────────────
+function downloadCSV(){
+  if (!topCombinations.length){ alert('Esegui prima ⚡ Calcola Ottimale per generare le combinazioni.'); return; }
+  const hdr=['Rank','Totale_pt','Configurazione_staffette','Posizione','Gara','Tipo','Atleta_e','Prestazione','Punti_FIDAL'];
+  const rows=[hdr];
+  topCombinations.forEach(({total,inclStaff,sel},ci)=>{
+    const sorted=[...sel].sort((a,b)=>pts(b)-pts(a));
+    sorted.forEach((r,i)=>{
+      const athlStr=r.isStaffetta?(r.staffAthl||[r.athlete]).join(' / '):r.athlete;
+      rows.push([ci+1, total, inclStaff, i+1, r.ev, r.type, athlStr, r.perf, pts(r)]);
+    });
+  });
+  const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+  const blob=new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  const soc=document.getElementById('f-societa').value||'CdS';
+  a.download=`${soc}_combinazioni.csv`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
 }
 
 // ── STAMPA / PDF ──────────────────────────────────────────
