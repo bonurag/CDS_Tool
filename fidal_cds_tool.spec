@@ -6,6 +6,9 @@ a = Analysis(
     binaries=[],
     datas=[
         ('Cadette.json', '.'),
+        ('Cadetti.json', '.'),
+        ('Ragazze.json', '.'),
+        ('Ragazzi.json', '.'),
     ],
     hiddenimports=[
         'flask',

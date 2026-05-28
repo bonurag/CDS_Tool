@@ -30,6 +30,9 @@ def _load_tabella(filename):
 
 _TABELLE = {
     'CF': _load_tabella('Cadette.json'),
+    'CM': _load_tabella('Cadetti.json'),
+    'RF': _load_tabella('Ragazze.json'),
+    'RM': _load_tabella('Ragazzi.json'),
 }
 
 def _match_gara(fidal_name, tabella):
@@ -729,7 +732,13 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 
   <!-- Event filter panel -->
   <div class="ev-filter-panel" id="ev-filter-panel" style="display:none">
-    <h3>🏅 Gare ammesse al CdS — clicca per escludere</h3>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">
+      <h3 style="margin:0">🏅 Gare nel programma CdS — clicca per escludere</h3>
+      <div style="display:flex;gap:.4rem">
+        <button class="btn-mok" id="btn-preset-cds" style="font-size:.72rem;padding:.22rem .65rem;display:none" onclick="applyPresetCds()">⚡ Preset CdS</button>
+        <button class="btn-mcancel" style="font-size:.72rem;padding:.22rem .65rem" onclick="resetEvFilter()">✕ Includi tutto</button>
+      </div>
+    </div>
     <div class="ev-chips-row" id="ev-chips"></div>
   </div>
 
@@ -894,9 +903,41 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 
 <script>
 // ── COSTANTI ────────────────────────────────────────────
-const LANCIO_EVS = new Set(['peso','martello','giavellotto','disco','lancio']);
+const LANCIO_EVS = new Set(['peso','martello','giavellotto','disco','lancio','vortex','palla']);
 const SALTO_EVS  = new Set(['lungo','triplo','alto','asta','salto']);
 const TYPE_LBL   = {corsa:'Corsa',ostacoli:'Ostacoli',salto:'Salto',lancio:'Lancio',staffetta:'Staffetta'};
+
+// ── PROGRAMMI TECNICI CdS (per preset filtro gare) ──────
+const CDS_PROGRAMS = {
+  // Ragazzi: 60hs, 60, 1000, Marcia 2km, Alto, Lungo, Peso gomma 2kg, Vortex, Staffetta 4x100
+  RM: ev => {
+    const e = ev.toLowerCase();
+    return e.includes('60 ostac') || e.includes('60 piani') ||
+           (e.includes('1000') && !e.includes('3x') && !e.includes('3 x')) ||
+           e.includes('marcia') || e.includes('in alto') || e.includes('in lungo') ||
+           (e.includes('peso') && e.includes('2')) ||
+           e.includes('vortex') ||
+           (e.includes('staffetta') && e.includes('100'));
+  },
+  // Cadetti: 100hs, 300hs, 80, 300, 1000, 2000, 1200 siepi, Asta, Alto, Lungo, Triplo,
+  //          Peso 4kg, Martello 4kg, Disco 1,5kg, Giavellotto 600g, Staffetta 4x100, Marcia 5km
+  CM: ev => {
+    const e = ev.toLowerCase();
+    return (e.includes('80') && e.includes('piani')) ||
+           (e.includes('100') && e.includes('ostac')) ||
+           (e.includes('300') && e.includes('ostac')) ||
+           (e.includes('300') && e.includes('piani')) ||
+           (e.includes('1000') && !e.includes('3x') && !e.includes('3 x')) ||
+           e.includes('2000') || e.includes('1200') ||
+           e.includes('asta') || e.includes('in alto') || e.includes('in lungo') ||
+           e.includes('triplo') ||
+           (e.includes('peso') && e.includes('4')) ||
+           e.includes('martello') || e.includes('disco') || e.includes('giavellott') ||
+           (e.includes('staffetta') && e.includes('100')) ||
+           e.includes('marcia');
+  },
+};
+CDS_PROGRAMS.RF = CDS_PROGRAMS.RM; // stesso programma tecnico dei Ragazzi
 
 // ── STATO ───────────────────────────────────────────────
 let ALL = [], selectedIds = new Set(), userPts = {}, staffAnalysis = [], excludedEvs = new Set(), topCombinations = [];
@@ -1480,6 +1521,9 @@ function buildEvFilterPanel(){
   const evs=[...new Set(ALL.map(r=>r.ev))].sort((a,b)=>a.localeCompare(b,'it'));
   if (!evs.length){ panel.style.display='none'; return; }
   panel.style.display='';
+  // Mostra bottone preset solo se la categoria corrente ha un programma definito
+  const btnPreset=document.getElementById('btn-preset-cds');
+  btnPreset.style.display=CDS_PROGRAMS[currentCategoria] ? '' : 'none';
   chipsEl.innerHTML='';
   evs.forEach(ev=>{
     const chip=document.createElement('span');
@@ -1489,6 +1533,30 @@ function buildEvFilterPanel(){
     chip.addEventListener('click',()=>toggleEvFilter(ev));
     chipsEl.appendChild(chip);
   });
+}
+
+function applyPresetCds(){
+  const fn=CDS_PROGRAMS[currentCategoria];
+  if (!fn) return;
+  const evs=[...new Set(ALL.map(r=>r.ev))];
+  evs.forEach(ev=>{
+    if (fn(ev)){
+      excludedEvs.delete(ev);
+    } else {
+      excludedEvs.add(ev);
+      ALL.filter(r=>r.ev===ev).forEach(r=>selectedIds.delete(r.id));
+    }
+  });
+  computeBests();
+  buildEvFilterPanel();
+  renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+}
+
+function resetEvFilter(){
+  excludedEvs.clear();
+  computeBests();
+  buildEvFilterPanel();
+  renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
 }
 
 function toggleEvFilter(ev){
