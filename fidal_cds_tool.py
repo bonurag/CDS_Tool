@@ -1665,6 +1665,8 @@ function assignBest(evSub, dblSet, inclStaff){
         if (sel.some(s=>s.id===r.id)) continue;
         if (pts(r)<=pts(r2)) break;
         const candidate=[...sel]; candidate[idx]=r;
+        // Blocca lo swap se svuoterebbe l'evento di r2 (singolo → 0 risultati)
+        if (!candidate.some(x=>!x.isStaffetta&&x.ev===r2.ev)) continue;
         if (isValidSelCaps(candidate, evCap, C.maxAthlInd)){ sel[idx]=r; swapped=true; break; }
       }
       if (swapped) break;
@@ -1690,7 +1692,11 @@ function searchOptimal(inclStaff){
       if (dc.length<nD) continue;
       for (const de of combIter(dc,nD)){
         const {sel,total}=assignBest(evSub,new Set(de),inclStaff);
-        if (sel.length===C.nSel&&total>best){best=total;bestSel=sel;}
+        if (sel.length!==C.nSel) continue;
+        // Tutti gli eventi di evSub devono avere almeno 1 risultato
+        const selEvs=new Set(sel.map(x=>x.ev));
+        if (!evSub.every(ev=>selEvs.has(ev))) continue;
+        if (total>best){best=total;bestSel=sel;}
       }
     }
   }
