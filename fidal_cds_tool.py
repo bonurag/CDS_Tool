@@ -998,11 +998,10 @@ function pts(r){ return userPts[r.id] !== undefined ? userPts[r.id] : r.pts; }
 function activeAll(){ return ALL.filter(r=>!excludedEvs.has(r.ev)); }
 
 // ── CATEGORIA PICKLIST ──────────────────────────────────
+// Limitato alle categorie con tabelle punteggi FIDAL disponibili
 const CATS={
-  F:[{v:'RF',l:'Ragazze (RF)'},{v:'CF',l:'Cadette (CF)'},{v:'AF',l:'Allieve (AF)'},
-     {v:'JF',l:'Juniores F (JF)'},{v:'PF',l:'Promesse F (PF)'},{v:'SF',l:'Senior F (SF)'}],
-  M:[{v:'RM',l:'Ragazzi (RM)'},{v:'CM',l:'Cadetti (CM)'},{v:'AM',l:'Allievi (AM)'},
-     {v:'JM',l:'Juniores M (JM)'},{v:'PM',l:'Promesse M (PM)'},{v:'SM',l:'Senior M (SM)'}],
+  F:[{v:'RF',l:'Ragazze (RF)'},{v:'CF',l:'Cadette (CF)'}],
+  M:[{v:'RM',l:'Ragazzi (RM)'},{v:'CM',l:'Cadetti (CM)'}],
 };
 function updateCatOptions(){
   const sesso=document.getElementById('f-sesso').value;
