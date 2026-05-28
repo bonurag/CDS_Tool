@@ -1636,7 +1636,8 @@ function assignBest(evSub, dblSet, inclStaff){
     if (staffEvs.has(ev)) continue;
     activeAll().filter(r=>r.ev===ev&&!r.isStaffetta).forEach(r=>cands.push(r));
   }
-  cands.sort((a,b)=>pts(b)-pts(a));
+  // Tiebreaker stabile: stesso punteggio → ordine deterministico per atleta+prestazione
+  cands.sort((a,b)=>pts(b)-pts(a)||a.athlete.localeCompare(b.athlete,'it')||a.perf.localeCompare(b.perf,'it'));
 
   // Greedy: prenota atleti staffetta, poi riempi in ordine di punteggio
   const sel=[],acTotal={},acInd={},evUsed={};
@@ -1658,7 +1659,7 @@ function assignBest(evSub, dblSet, inclStaff){
   let swapped=true;
   while (swapped){
     swapped=false;
-    const indivSel=sel.filter(s=>!s.isStaffetta).sort((a,b)=>pts(a)-pts(b));
+    const indivSel=sel.filter(s=>!s.isStaffetta).sort((a,b)=>pts(a)-pts(b)||a.athlete.localeCompare(b.athlete,'it'));
     for (const r2 of indivSel){
       const idx=sel.indexOf(r2);
       for (const r of cands){
