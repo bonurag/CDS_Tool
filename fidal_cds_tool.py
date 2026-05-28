@@ -161,7 +161,7 @@ def classify_event(nome):
     if re.search(r'staffetta|[34]x\d+|\dx\d', n): return 'staffetta'
     if re.search(r'\bhs\b|ostacoli|siepi', n):     return 'ostacoli'
     if re.search(r'lungo|triplo|alto|asta|salto',n): return 'salto'
-    if re.search(r'peso|martello|giavellotto|disco|lancio', n): return 'lancio'
+    if re.search(r'peso|martello|giavellotto|disco|lancio|vortex|palla', n): return 'lancio'
     return 'corsa'
 
 def parse_graduatorie(html):
@@ -984,14 +984,15 @@ function athleteDisplay(r, short=false){
 let sortCol = -1, sortAsc = true;
 
 function isLancio(ev){
+  // Keyword ha priorità (override per eventi FIDAL classificati erroneamente)
+  if ([...LANCIO_EVS].some(k=>ev.toLowerCase().includes(k))) return true;
   const r=activeAll().find(x=>x.ev===ev);
-  if (r && r.type) return r.type==='lancio';
-  return [...LANCIO_EVS].some(k=>ev.toLowerCase().includes(k));
+  return !!(r && r.type==='lancio');
 }
 function isSalto(ev){
+  if ([...SALTO_EVS].some(k=>ev.toLowerCase().includes(k))) return true;
   const r=activeAll().find(x=>x.ev===ev);
-  if (r && r.type) return r.type==='salto';
-  return [...SALTO_EVS].some(k=>ev.toLowerCase().includes(k));
+  return !!(r && r.type==='salto');
 }
 function pts(r){ return userPts[r.id] !== undefined ? userPts[r.id] : r.pts; }
 function activeAll(){ return ALL.filter(r=>!excludedEvs.has(r.ev)); }
@@ -1117,7 +1118,7 @@ function computeBests(){
   activeAll().forEach(r=>{ if(!byEvent[r.ev]) byEvent[r.ev]=[]; byEvent[r.ev].push(r); });
   for (const ers of Object.values(byEvent)){
     if (ers[0].isStaffetta){ ers.forEach(r=>r.isBest=true); continue; }
-    const isTime = !['salto','lancio'].includes(ers[0].type);
+    const isTime = !isLancio(ers[0].ev) && !isSalto(ers[0].ev);
     const parsed = ers.map(r=>({r, p:parsePerf(r.perf)})).filter(x=>!isNaN(x.p)&&x.p>0);
     if (!parsed.length) continue;
     const bestVal = isTime ? Math.min(...parsed.map(x=>x.p)) : Math.max(...parsed.map(x=>x.p));
