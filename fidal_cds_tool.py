@@ -337,6 +337,18 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 .cbox.warn{border-color:var(--orange);color:var(--orange);background:#fff8f0}
 .cbox.err{border-color:var(--red);color:var(--red);background:#fdf0f0}
 
+/* EVENT FILTER PANEL */
+.ev-filter-panel{background:#fff;border-bottom:2px solid var(--border);padding:.65rem 2rem;display:flex;flex-direction:column;gap:.5rem}
+.ev-filter-panel h3{font-family:var(--head);font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.ev-chips-row{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center}
+.ev-chip{font-size:.72rem;font-weight:600;padding:.22rem .65rem;border-radius:12px;
+  border:1.5px solid var(--green);background:#f0faf4;color:var(--green);
+  cursor:pointer;transition:all .15s;white-space:nowrap;
+  font-family:var(--head);letter-spacing:.02em;user-select:none}
+.ev-chip:hover{opacity:.75}
+.ev-chip.excl{border-color:#bbb;background:#f2f2f2;color:#aaa;text-decoration:line-through}
+.ev-chip.excl:hover{border-color:var(--green);background:#f0faf4;color:var(--green);text-decoration:none;opacity:1}
+
 /* STAFFETTA PANEL */
 .staff-panel{background:#fff;border-bottom:2px solid var(--border);padding:.85rem 2rem}
 .staff-panel h3{font-family:var(--head);font-size:.82rem;font-weight:700;
@@ -631,6 +643,12 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
     <div class="cbox" id="c-at">  <span>👤</span><span id="c-at-t">Vincoli OK</span></div>
   </div>
 
+  <!-- Event filter panel -->
+  <div class="ev-filter-panel" id="ev-filter-panel" style="display:none">
+    <h3>🏅 Gare ammesse al CdS — clicca per escludere</h3>
+    <div class="ev-chips-row" id="ev-chips"></div>
+  </div>
+
   <!-- Staffetta Analysis -->
   <div class="staff-panel" id="staff-panel" style="display:none">
     <h3>⚡ Analisi Staffette</h3>
@@ -742,7 +760,7 @@ const SALTO_EVS  = new Set(['lungo','triplo','alto','asta','salto']);
 const TYPE_LBL   = {corsa:'Corsa',ostacoli:'Ostacoli',salto:'Salto',lancio:'Lancio',staffetta:'Staffetta'};
 
 // ── STATO ───────────────────────────────────────────────
-let ALL = [], selectedIds = new Set(), userPts = {}, staffAnalysis = [];
+let ALL = [], selectedIds = new Set(), userPts = {}, staffAnalysis = [], excludedEvs = new Set();
 
 function athleteDisplay(r, short=false){
   if (r.isStaffetta) return (r.staffAthl||[r.athlete]).join(' / ');
@@ -755,6 +773,7 @@ let sortCol = -1, sortAsc = true;
 function isLancio(ev){ return [...LANCIO_EVS].some(k=>ev.toLowerCase().includes(k)); }
 function isSalto(ev){  return [...SALTO_EVS].some(k=>ev.toLowerCase().includes(k)); }
 function pts(r){ return userPts[r.id] !== undefined ? userPts[r.id] : r.pts; }
+function activeAll(){ return ALL.filter(r=>!excludedEvs.has(r.ev)); }
 
 // ── URL PREVIEW ─────────────────────────────────────────
 function updateUrlPreview(){
@@ -796,7 +815,7 @@ async function fetchData(){
     if (!json.ok) throw new Error(json.error);
 
     ALL = json.data;
-    selectedIds.clear(); userPts = {}; staffAnalysis = [];
+    selectedIds.clear(); userPts = {}; staffAnalysis = []; excludedEvs = new Set();
 
     // Segna miglior prestazione per disciplina
     computeBests();
@@ -836,6 +855,7 @@ function setupToolScreen(p){
   const staffette = ALL.filter(r=>r.isStaffetta);
   document.getElementById('staff-panel').style.display = staffette.length ? '' : 'none';
 
+  buildEvFilterPanel();
   updateConstraints(); renderAll(); renderAthleteTracker();
 }
 
@@ -850,8 +870,9 @@ function parsePerf(perf){
 }
 
 function computeBests(){
+  ALL.forEach(r=>r.isBest=false);
   const byEvent = {};
-  ALL.forEach(r=>{ r.isBest=false; if(!byEvent[r.ev]) byEvent[r.ev]=[]; byEvent[r.ev].push(r); });
+  activeAll().forEach(r=>{ if(!byEvent[r.ev]) byEvent[r.ev]=[]; byEvent[r.ev].push(r); });
   for (const ers of Object.values(byEvent)){
     if (ers[0].isStaffetta){ ers.forEach(r=>r.isBest=true); continue; }
     const isTime = !['salto','lancio'].includes(ers[0].type);
@@ -1053,7 +1074,7 @@ function renderAll(){
   const nameF=document.getElementById('f-name').value.toLowerCase();
   const evF=document.getElementById('f-ev-filter').value;
 
-  let filtered=ALL.filter(r=>
+  let filtered=activeAll().filter(r=>
     (!typeF||r.type===typeF)&&
     (!nameF||r.athlete.toLowerCase().includes(nameF))&&
     (!evF||r.ev===evF)
@@ -1102,6 +1123,36 @@ function renderAll(){
   }).join('');
 }
 
+// ── FILTRO GARE CDS ───────────────────────────────────────
+function buildEvFilterPanel(){
+  const panel=document.getElementById('ev-filter-panel');
+  const chipsEl=document.getElementById('ev-chips');
+  const evs=[...new Set(ALL.map(r=>r.ev))].sort((a,b)=>a.localeCompare(b,'it'));
+  if (!evs.length){ panel.style.display='none'; return; }
+  panel.style.display='';
+  chipsEl.innerHTML='';
+  evs.forEach(ev=>{
+    const chip=document.createElement('span');
+    chip.className='ev-chip'+(excludedEvs.has(ev)?' excl':'');
+    chip.textContent=ev;
+    chip.title=excludedEvs.has(ev)?'Clicca per includere nel CdS':'Clicca per escludere dal CdS';
+    chip.addEventListener('click',()=>toggleEvFilter(ev));
+    chipsEl.appendChild(chip);
+  });
+}
+
+function toggleEvFilter(ev){
+  if (excludedEvs.has(ev)){
+    excludedEvs.delete(ev);
+  } else {
+    excludedEvs.add(ev);
+    ALL.filter(r=>r.ev===ev).forEach(r=>selectedIds.delete(r.id));
+  }
+  computeBests();
+  buildEvFilterPanel();
+  renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+}
+
 // ── OTTIMIZZAZIONE ────────────────────────────────────────
 function* combIter(arr, k){
   const n=arr.length;
@@ -1122,7 +1173,7 @@ function assignBest(evSub, dblSet, inclStaff){
   const cands=[];
   for (const ev of evSub){
     if (staffEvs.has(ev)) continue;
-    ALL.filter(r=>r.ev===ev&&!r.isStaffetta).forEach(r=>cands.push(r));
+    activeAll().filter(r=>r.ev===ev&&!r.isStaffetta).forEach(r=>cands.push(r));
   }
   cands.sort((a,b)=>pts(b)-pts(a));
   const sel=[],ac={},evUsed={};
@@ -1141,7 +1192,7 @@ function assignBest(evSub, dblSet, inclStaff){
 
 function searchOptimal(inclStaff){
   const staffEvs=new Set(inclStaff.map(r=>r.ev));
-  const evList=[...new Set(ALL.filter(r=>!r.isStaffetta||staffEvs.has(r.ev)).map(r=>r.ev))];
+  const evList=[...new Set(activeAll().filter(r=>!r.isStaffetta||staffEvs.has(r.ev)).map(r=>r.ev))];
   const dbl=evList.filter(ev=>ALL.filter(r=>r.ev===ev).length>=2);
   let best=-1,bestSel=null;
   for (let nEv=10;nEv<=Math.min(13,evList.length);nEv++){
@@ -1173,7 +1224,7 @@ function setNoteEst(msg, isError=false){
 }
 
 function computeOptimal(){
-  const missing=ALL.filter(r=>userPts[r.id]===undefined&&!r.pts_ok);
+  const missing=activeAll().filter(r=>userPts[r.id]===undefined&&!r.pts_ok);
   if (missing.length>0){
     setNoteEst(`⚠ ${missing.length} risultat${missing.length===1?'o':'i'} senza punteggio — inserisci i punti FIDAL per tutti prima di calcolare.`, true);
     return;
@@ -1182,7 +1233,7 @@ function computeOptimal(){
   document.getElementById('loading').classList.remove('hidden');
   setTimeout(()=>{
     try {
-      const allStaff=ALL.filter(r=>r.isStaffetta);
+      const allStaff=activeAll().filter(r=>r.isStaffetta);
       const n=allStaff.length;
       let bestTotal=-1,bestSel=null;
       staffAnalysis=[];
