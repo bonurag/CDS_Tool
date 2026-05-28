@@ -14,3 +14,6 @@ dist/
 
 # User data (generated at runtime)
 manual_entries.json
+
+# IDE/tool config
+.claude/
