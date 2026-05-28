@@ -310,6 +310,57 @@ def api_manual_delete(saved_id):
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)})
 
+@app.route('/api/societa')
+def api_societa():
+    regione = request.args.get('regione', '').strip().upper()
+    if not regione:
+        return jsonify({'ok': False, 'error': 'Regione mancante'})
+    try:
+        url = f'https://www.fidal.it/mappa.php?x=1&regione={regione}'
+        hdrs = {
+            'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                           'AppleWebKit/537.36 (KHTML, like Gecko) '
+                           'Chrome/124.0.0.0 Safari/537.36'),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.fidal.it/mappa.php',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        sess = requests.Session()
+        sess.headers.update(hdrs)
+        try:
+            sess.get('https://www.fidal.it/mappa.php', timeout=8)
+        except Exception:
+            pass
+        r = sess.get(url, timeout=15)
+        r.raise_for_status()
+
+        # Le società sono in link /societa/NOME-SLUG/CODICE
+        soup = BeautifulSoup(r.text, 'html.parser')
+        societa = []
+        for a in soup.find_all('a', href=re.compile(r'/societa/[^/]+/[A-Z]{2}\d')):
+            m = re.search(r'/([A-Z]{2}\d+)$', a['href'])
+            if m:
+                nome = a.get_text(strip=True)
+                if nome:
+                    societa.append({'cod': m.group(1), 'nome': nome})
+
+        if not societa:
+            return jsonify({'ok': False,
+                'error': f'Nessuna società trovata per la regione {regione}.'})
+
+        seen, unique = set(), []
+        for s in societa:
+            if s['cod'] not in seen:
+                seen.add(s['cod'])
+                unique.append(s)
+        unique.sort(key=lambda x: x['nome'])
+        return jsonify({'ok': True, 'data': unique})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
 # ── FRONTEND HTML ─────────────────────────────────────────────────────────────
 
 FRONTEND_HTML = r"""<!DOCTYPE html>
@@ -588,11 +639,25 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   background:#fff3cd;color:#856404;border:1px solid #ffc107;padding:.07rem .35rem;
   border-radius:3px;margin-left:.35rem;vertical-align:middle}
 
+/* GLOBAL FILTERS PANEL */
+.gfilter-panel{background:#fff;border-bottom:2px solid var(--border);padding:.6rem 2rem;display:flex;flex-direction:column;gap:.5rem}
+.gfilter-section{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
+.gfilter-label{font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);white-space:nowrap;min-width:180px}
+.gfilter-input{font-family:var(--body);font-size:.79rem;border:1.5px solid var(--border);border-radius:5px;padding:.28rem .55rem;background:var(--bg);color:var(--text);outline:none;transition:border-color .15s}
+.gfilter-input:focus{border-color:var(--blue)}
+.btn-gfilter-add{font-family:var(--head);font-size:.74rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;background:transparent;border:1.5px solid var(--red);color:var(--red);padding:.22rem .65rem;border-radius:5px;cursor:pointer;transition:all .15s}
+.btn-gfilter-add:hover{background:var(--red);color:#fff}
+.unavail-chip{display:flex;align-items:center;gap:.25rem;font-size:.71rem;padding:.15rem .45rem;border-radius:10px;border:1.5px solid #e57373;background:#fdf0f0;color:var(--red);white-space:nowrap;font-weight:600}
+.unavail-chip button{background:none;border:none;cursor:pointer;color:var(--red);font-size:.78rem;padding:0;line-height:1}
+.unavail-chip button:hover{color:#7b1a1a}
+
 @media(max-width:680px){
   .form-grid{grid-template-columns:1fr}
   .form-group.span2{grid-column:1}
   .hbar,.cbar,.staff-panel,.totbar,.main{padding-left:1rem;padding-right:1rem}
   .hmeta{display:none}
+  .gfilter-panel{padding-left:1rem;padding-right:1rem}
+  .gfilter-label{min-width:unset}
 }
 </style>
 </head>
@@ -704,10 +769,20 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
           </select>
         </div>
 
-        <div class="form-group span2">
-          <label>Codice Società FIDAL (es. BS318)</label>
-          <input id="f-societa" type="text" placeholder="Codice società (obbligatorio)"
-            value="BS318" style="text-transform:uppercase">
+        <div class="form-group">
+          <label>Società (cerca per nome)</label>
+          <input id="f-societa-name" type="text" list="societa-datalist"
+            placeholder="Cerca per nome…" autocomplete="off"
+            oninput="onSocietaNomeInput()">
+          <datalist id="societa-datalist"></datalist>
+          <span id="societa-status" style="font-size:.67rem;color:var(--muted);
+            margin-top:.2rem;display:block"></span>
+        </div>
+        <div class="form-group">
+          <label>Codice Società FIDAL</label>
+          <input id="f-societa" type="text" placeholder="es. BS318"
+            value="BS318" style="text-transform:uppercase"
+            oninput="onSocietaCodiceInput()">
         </div>
       </div>
 
@@ -741,6 +816,28 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
     <div class="cbox" id="c-la">  <span>⭕</span><span id="c-la-t">0/2 lanci</span></div>
     <div class="cbox" id="c-sa">  <span>↑</span><span id="c-sa-t">0/2 salti</span></div>
     <div class="cbox" id="c-at">  <span>👤</span><span id="c-at-t">Vincoli OK</span></div>
+  </div>
+
+  <!-- Global Filters Panel -->
+  <div class="gfilter-panel" id="gfilter-panel">
+    <div class="gfilter-section">
+      <span class="gfilter-label">🚫 Atleti non disponibili:</span>
+      <input id="unavail-input" class="gfilter-input" list="unavail-list"
+        placeholder="Cerca atleta…" style="min-width:160px"
+        onkeydown="if(event.key==='Enter')addUnavailFromInput()">
+      <datalist id="unavail-list"></datalist>
+      <button class="btn-gfilter-add" onclick="addUnavailFromInput()">Escludi</button>
+      <div id="unavail-chips" style="display:flex;gap:.3rem;flex-wrap:wrap"></div>
+    </div>
+    <div class="gfilter-section">
+      <span class="gfilter-label">📅 Solo prestazioni dal:</span>
+      <input id="date-filter-input" class="gfilter-input" type="date"
+        style="min-width:145px" onchange="onDateFilterChange()">
+      <button class="btn-mcancel" id="date-filter-clear"
+        style="font-size:.72rem;padding:.22rem .65rem;display:none"
+        onclick="clearDateFilter()">✕ Azzera</button>
+      <span id="date-filter-count" style="font-size:.72rem;color:var(--muted)"></span>
+    </div>
   </div>
 
   <!-- Saved manual entries reload bar -->
@@ -973,7 +1070,9 @@ function getC(){ return CONSTRAINTS[currentCategoria] || CONSTRAINTS.default; }
 
 // ── STATO ───────────────────────────────────────────────
 let ALL = [], selectedIds = new Set(), userPts = {}, staffAnalysis = [], excludedEvs = new Set(), topCombinations = [];
-let currentCategoria = '', savedManualEntries = [];
+let currentCategoria = '', currentAnno = 2026, savedManualEntries = [];
+let unavailableAthletes = new Set(), minDateFilter = null;
+let societaList = [];
 
 function athleteDisplay(r, short=false){
   if (r.isStaffetta) return (r.staffAthl||[r.athlete]).join(' / ');
@@ -995,7 +1094,18 @@ function isSalto(ev){
   return !!(r && r.type==='salto');
 }
 function pts(r){ return userPts[r.id] !== undefined ? userPts[r.id] : r.pts; }
-function activeAll(){ return ALL.filter(r=>!excludedEvs.has(r.ev)); }
+function activeAll(){
+  return ALL.filter(r=>{
+    if (excludedEvs.has(r.ev)) return false;
+    const athls = r.isStaffetta ? (r.staffAthl||[r.athlete]) : [r.athlete];
+    if (athls.some(a=>unavailableAthletes.has(a))) return false;
+    if (minDateFilter && r.data){
+      const d = parseResultDate(r.data);
+      if (d && d < minDateFilter) return false;
+    }
+    return true;
+  });
+}
 
 // ── CATEGORIA PICKLIST ──────────────────────────────────
 // Limitato alle categorie con tabelle punteggi FIDAL disponibili
@@ -1022,7 +1132,48 @@ function updateUrlPreview(){
 ['f-anno','f-tipo','f-sesso','f-cat','f-reg','f-naz','f-vento','f-limite','f-societa']
   .forEach(id => document.getElementById(id).addEventListener('change', updateUrlPreview));
 document.getElementById('f-societa').addEventListener('input', updateUrlPreview);
+// Ricarica lista società quando cambia la regione
+document.getElementById('f-reg').addEventListener('change', () => {
+  document.getElementById('f-societa-name').value = '';
+  loadSocieta(document.getElementById('f-reg').value);
+});
 updateCatOptions(); // popola la picklist categorie al caricamento
+loadSocieta(document.getElementById('f-reg').value); // carica società per la regione default
+
+// ── RICERCA SOCIETÀ ──────────────────────────────────────
+async function loadSocieta(regione){
+  const statusEl = document.getElementById('societa-status');
+  const dl       = document.getElementById('societa-datalist');
+  societaList = [];
+  dl.innerHTML = '';
+  statusEl.textContent = 'Caricamento…';
+  try {
+    const resp = await fetch(`/api/societa?regione=${encodeURIComponent(regione)}`);
+    const json = await resp.json();
+    if (!json.ok) throw new Error(json.error);
+    societaList = json.data;
+    dl.innerHTML = societaList.map(s =>
+      `<option value="${s.nome.replace(/"/g,'&quot;')}">`
+    ).join('');
+    statusEl.textContent = `${societaList.length} società`;
+  } catch(e) {
+    statusEl.textContent = `⚠ ${e.message}`;
+  }
+}
+
+function onSocietaNomeInput(){
+  const nome  = document.getElementById('f-societa-name').value.trim();
+  const found = societaList.find(s => s.nome === nome);
+  if (found){
+    document.getElementById('f-societa').value = found.cod;
+    updateUrlPreview();
+  }
+}
+
+function onSocietaCodiceInput(){
+  document.getElementById('f-societa-name').value = '';
+  updateUrlPreview();
+}
 
 function getFormParams(){
   return {
@@ -1053,6 +1204,7 @@ async function fetchData(){
 
     ALL = json.data;
     selectedIds.clear(); userPts = {}; staffAnalysis = []; excludedEvs = new Set();
+    unavailableAthletes = new Set(); minDateFilter = null;
 
     // Segna miglior prestazione per disciplina
     computeBests();
@@ -1074,9 +1226,16 @@ async function fetchData(){
 
 function setupToolScreen(p){
   currentCategoria = p.categoria;
+  currentAnno = +p.anno || new Date().getFullYear();
   document.getElementById('manual-reload-bar').style.display='none';
   savedManualEntries=[];
   checkSavedManualEntries(p.categoria);
+
+  // Reset filtri globali
+  document.getElementById('date-filter-input').value='';
+  document.getElementById('date-filter-clear').style.display='none';
+  document.getElementById('date-filter-count').textContent='';
+  renderUnavailPanel();
 
   const cat = document.getElementById('f-cat');
   const catLabel = cat.options[cat.selectedIndex].text;
@@ -1654,6 +1813,95 @@ function toggleEvFilter(ev){
   }
   computeBests();
   buildEvFilterPanel();
+  renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+}
+
+// ── ATLETI NON DISPONIBILI ────────────────────────────────
+function renderUnavailPanel(){
+  const allAthletes=[...new Set(ALL.filter(r=>!r.isStaffetta).map(r=>r.athlete))].sort((a,b)=>a.localeCompare(b,'it'));
+  const dl=document.getElementById('unavail-list');
+  dl.innerHTML=allAthletes.filter(a=>!unavailableAthletes.has(a)).map(a=>`<option value="${a}">`).join('');
+  const chips=document.getElementById('unavail-chips');
+  chips.innerHTML=[...unavailableAthletes].sort((a,b)=>a.localeCompare(b,'it')).map(a=>
+    `<span class="unavail-chip">${a}<button onclick="removeUnavailable(${JSON.stringify(a)})" title="Ripristina">✕</button></span>`
+  ).join('');
+}
+
+function addUnavailFromInput(){
+  const input=document.getElementById('unavail-input');
+  const name=(input.value||'').trim();
+  if (!name) return;
+  unavailableAthletes.add(name);
+  // Rimuovi dalla selezione i risultati dell'atleta escluso
+  ALL.filter(r=>{
+    const athls=r.isStaffetta?(r.staffAthl||[r.athlete]):[r.athlete];
+    return athls.some(a=>a===name);
+  }).forEach(r=>selectedIds.delete(r.id));
+  input.value='';
+  _afterGlobalFilter();
+}
+
+function removeUnavailable(name){
+  unavailableAthletes.delete(name);
+  _afterGlobalFilter();
+}
+
+// ── FILTRO DATA PRESTAZIONE ───────────────────────────────
+function parseResultDate(str){
+  if (!str) return null;
+  // Con anno: DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+  let m=str.match(/(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})/);
+  if (m) return new Date(+m[3], +m[2]-1, +m[1]);
+  // Solo giorno/mese (formato FIDAL standard): DD/MM, DD-MM, DD.MM
+  // → usa l'anno della ricerca corrente
+  m=str.match(/(\d{1,2})[\/\-\.](\d{1,2})/);
+  if (m) return new Date(currentAnno, +m[2]-1, +m[1]);
+  return null;
+}
+
+function onDateFilterChange(){
+  const val=document.getElementById('date-filter-input').value;
+  if (val){
+    // input type=date restituisce YYYY-MM-DD (UTC): parsifichiamo in ora locale
+    const [y,mo,d]=val.split('-').map(Number);
+    minDateFilter=new Date(y, mo-1, d);
+  } else {
+    minDateFilter=null;
+  }
+  document.getElementById('date-filter-clear').style.display=val?'':'none';
+  if (minDateFilter){
+    ALL.filter(r=>{
+      if (!r.data) return false;
+      const d=parseResultDate(r.data);
+      return d && d < minDateFilter;
+    }).forEach(r=>selectedIds.delete(r.id));
+  }
+  _afterGlobalFilter();
+}
+
+function clearDateFilter(){
+  document.getElementById('date-filter-input').value='';
+  minDateFilter=null;
+  document.getElementById('date-filter-clear').style.display='none';
+  _afterGlobalFilter();
+}
+
+function _updateDateCount(){
+  const el=document.getElementById('date-filter-count');
+  if (!minDateFilter){ el.textContent=''; return; }
+  const n=ALL.filter(r=>{
+    if (!r.data) return false;
+    const d=parseResultDate(r.data);
+    return d && d < minDateFilter;
+  }).length;
+  el.textContent=n>0?`(${n} risultat${n===1?'o':'i'} esclus${n===1?'o':'i'})`:'(nessun risultato escluso)';
+}
+
+function _afterGlobalFilter(){
+  computeBests();
+  buildEvFilterPanel();
+  renderUnavailPanel();
+  _updateDateCount();
   renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
 }
 
