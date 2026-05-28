@@ -11,3 +11,6 @@ diag*.py
 # PyInstaller build artifacts
 build/
 dist/
+
+# User data (generated at runtime)
+manual_entries.json

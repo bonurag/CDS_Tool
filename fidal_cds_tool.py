@@ -250,6 +250,63 @@ def api_fetch():
 def index():
     return Response(FRONTEND_HTML, mimetype='text/html')
 
+# ── MANUAL ENTRIES PERSISTENCE ────────────────────────────────────────────────
+
+def _data_dir():
+    """Directory scrivibile anche in modalità PyInstaller (accanto all'exe)."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+MANUAL_FILE = os.path.join(_data_dir(), 'manual_entries.json')
+
+def _read_manual():
+    if not os.path.exists(MANUAL_FILE):
+        return {}
+    try:
+        with open(MANUAL_FILE, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _write_manual(data):
+    with open(MANUAL_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+@app.route('/api/manual', methods=['GET'])
+def api_manual_get():
+    categoria = request.args.get('categoria', '')
+    data = _read_manual()
+    return jsonify({'ok': True, 'data': data.get(categoria, [])})
+
+@app.route('/api/manual', methods=['POST'])
+def api_manual_save():
+    try:
+        entry = request.get_json(force=True)
+        categoria = entry.get('categoria', '')
+        if not categoria:
+            return jsonify({'ok': False, 'error': 'Categoria mancante'})
+        saved_id = f"{categoria}_{int(time.time()*1000)}"
+        entry['savedId'] = saved_id
+        entry['savedAt'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+        data = _read_manual()
+        data.setdefault(categoria, []).append(entry)
+        _write_manual(data)
+        return jsonify({'ok': True, 'savedId': saved_id})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+@app.route('/api/manual/<saved_id>', methods=['DELETE'])
+def api_manual_delete(saved_id):
+    try:
+        data = _read_manual()
+        for cat in list(data.keys()):
+            data[cat] = [e for e in data[cat] if e.get('savedId') != saved_id]
+        _write_manual(data)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
 # ── FRONTEND HTML ─────────────────────────────────────────────────────────────
 
 FRONTEND_HTML = r"""<!DOCTYPE html>
@@ -477,6 +534,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   color:var(--muted);display:flex;gap:1.25rem;flex-wrap:wrap}
 .grand-total{font-family:var(--mono);font-size:1.05rem;font-weight:600;color:var(--blue)}
 
+/* MANUAL RELOAD BAR */
+.manual-reload-bar{background:#fff8e1;border-bottom:2px solid #ffc107;
+  padding:.5rem 2rem;display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;font-size:.82rem}
+
 /* MANUAL ENTRY */
 .manual-bar{padding:.55rem 1rem;border-top:1px solid var(--border);background:#fafbfd;
   display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}
@@ -670,6 +731,13 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
     <div class="cbox" id="c-at">  <span>👤</span><span id="c-at-t">Vincoli OK</span></div>
   </div>
 
+  <!-- Saved manual entries reload bar -->
+  <div class="manual-reload-bar" id="manual-reload-bar" style="display:none">
+    <span>💾 <strong id="reload-count">0</strong> risultati manuali salvati per questa categoria — vuoi ricaricarli?</span>
+    <button class="btn-mok" style="font-size:.74rem;padding:.22rem .65rem" onclick="reloadManualEntries()">⟳ Ricarica</button>
+    <button class="btn-mcancel" style="font-size:.74rem" onclick="dismissReloadBar()">✕ Ignora</button>
+  </div>
+
   <!-- Event filter panel -->
   <div class="ev-filter-panel" id="ev-filter-panel" style="display:none">
     <h3>🏅 Gare ammesse al CdS — clicca per escludere</h3>
@@ -843,6 +911,7 @@ const TYPE_LBL   = {corsa:'Corsa',ostacoli:'Ostacoli',salto:'Salto',lancio:'Lanc
 
 // ── STATO ───────────────────────────────────────────────
 let ALL = [], selectedIds = new Set(), userPts = {}, staffAnalysis = [], excludedEvs = new Set(), topCombinations = [];
+let currentCategoria = '', savedManualEntries = [];
 
 function athleteDisplay(r, short=false){
   if (r.isStaffetta) return (r.staffAthl||[r.athlete]).join(' / ');
@@ -918,6 +987,11 @@ async function fetchData(){
 }
 
 function setupToolScreen(p){
+  currentCategoria = p.categoria;
+  document.getElementById('manual-reload-bar').style.display='none';
+  savedManualEntries=[];
+  checkSavedManualEntries(p.categoria);
+
   const cat = document.getElementById('f-cat');
   const catLabel = cat.options[cat.selectedIndex].text;
   const sesso = p.sesso==='F'?'Femminile':'Maschile';
@@ -1275,6 +1349,20 @@ function submitManual(){
   };
 
   ALL.push(r);
+
+  // Persisti sul server
+  const savePayload={
+    categoria:currentCategoria, ev:r.ev, type:r.type, athlete:r.athlete,
+    perf:r.perf, wind:r.wind, piazz:r.piazz, citta:r.citta, data:r.data,
+    anno:r.anno, pts:r.pts, pts_ok:r.pts_ok,
+    isStaffetta:r.isStaffetta, rawStaff:r.rawStaff, staffAthl:r.staffAthl,
+    isManual:true,
+  };
+  fetch('/api/manual',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(savePayload)})
+    .then(res=>res.json()).then(json=>{ if(json.ok) r.savedId=json.savedId; })
+    .catch(()=>{});
+
   computeBests();
   buildEvFilterPanel();
 
@@ -1299,11 +1387,65 @@ function submitManual(){
 function removeManual(id){
   const idx=ALL.findIndex(r=>r.id===id&&r.isManual);
   if (idx<0) return;
+  const r=ALL[idx];
+  if (r.savedId)
+    fetch(`/api/manual/${r.savedId}`,{method:'DELETE'}).catch(()=>{});
   ALL.splice(idx,1);
   selectedIds.delete(id);
   computeBests();
   buildEvFilterPanel();
   renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+}
+
+async function checkSavedManualEntries(categoria){
+  try {
+    const resp=await fetch(`/api/manual?categoria=${encodeURIComponent(categoria)}`);
+    const json=await resp.json();
+    if (json.ok && json.data.length>0){
+      savedManualEntries=json.data;
+      document.getElementById('reload-count').textContent=json.data.length;
+      document.getElementById('manual-reload-bar').style.display='';
+    }
+  } catch(e){}
+}
+
+function dismissReloadBar(){
+  document.getElementById('manual-reload-bar').style.display='none';
+  savedManualEntries=[];
+}
+
+function reloadManualEntries(){
+  savedManualEntries.forEach(entry=>{
+    // Evita duplicati (stesso savedId già caricato)
+    if (entry.savedId && ALL.some(r=>r.savedId===entry.savedId)) return;
+    const r={
+      id: manualIdCounter++,
+      ev: entry.ev, type: entry.type,
+      athlete: entry.athlete, athlete_url:'',
+      perf: entry.perf, wind: entry.wind||'', piazz: entry.piazz||'',
+      citta: entry.citta||'', data: entry.data||'', anno: entry.anno||'',
+      pts: entry.pts||0, pts_ok: entry.pts_ok||false,
+      isStaffetta: entry.isStaffetta||false,
+      rawStaff: entry.rawStaff||'',
+      staffAthl: entry.staffAthl||undefined,
+      isManual: true,
+      savedId: entry.savedId,
+    };
+    if (r.isStaffetta && !r.staffAthl)
+      r.staffAthl=resolveStaffettaAthletes(r.rawStaff);
+    ALL.push(r);
+
+    // Aggiorna filtro discipline
+    const evSel=document.getElementById('f-ev-filter');
+    if (![...evSel.options].some(o=>o.value===r.ev)){
+      const o=document.createElement('option'); o.value=r.ev; o.textContent=r.ev; evSel.appendChild(o);
+    }
+  });
+  computeBests();
+  buildEvFilterPanel();
+  renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+  document.getElementById('manual-reload-bar').style.display='none';
+  savedManualEntries=[];
 }
 
 // ── FILTRO GARE CDS ───────────────────────────────────────
