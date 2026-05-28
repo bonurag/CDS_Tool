@@ -533,6 +533,20 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 
 .dbl-badge{background:#fef3c7;color:#92400e;font-size:.62rem;font-weight:700;
   padding:.1rem .32rem;border-radius:4px;margin-left:.3rem}
+.tie-badge{background:#fff3cd;color:#7a5700;font-size:.62rem;font-weight:800;
+  padding:.1rem .32rem;border-radius:4px;margin-left:.4rem;cursor:help;
+  border:1px solid #f0c040}
+.tie-panel{background:#fffbeb;border-bottom:2px solid #f0c040;padding:.75rem 2rem;
+  font-size:.78rem;display:flex;flex-direction:column;gap:.35rem}
+.tie-panel-title{font-family:var(--head);font-size:.78rem;font-weight:700;
+  color:#7a5700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.1rem}
+.tie-row{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;padding:.15rem 0;
+  border-bottom:1px solid #f5e090}
+.tie-row:last-child{border-bottom:none}
+.tie-sel{color:#444;white-space:nowrap}
+.tie-chip{background:#fff;border:1px solid #d4b800;color:#5a3e00;border-radius:10px;
+  padding:.1rem .45rem;font-size:.72rem;white-space:nowrap;cursor:pointer}
+.tie-chip:hover{background:#fff8d0}
 .legenda{padding:.55rem 1rem;border-top:1px solid var(--border);font-size:.69rem;
   color:var(--muted);display:flex;gap:1.25rem;flex-wrap:wrap}
 .grand-total{font-family:var(--mono);font-size:1.05rem;font-weight:600;color:var(--blue)}
@@ -766,9 +780,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
     <!-- PROSPETTO -->
     <div class="card">
       <div class="card-head">
-        <h2>Prospetto Scheda — 13 risultati selezionati</h2>
+        <h2 id="pros-title">Prospetto Scheda</h2>
         <span class="badge-n" id="sel-n">0</span>
       </div>
+      <!-- Avviso pareggi punteggio -->
+      <div class="tie-panel" id="tie-panel" style="display:none"></div>
       <div style="overflow-x:auto">
         <table class="tbl">
           <thead><tr>
@@ -1274,12 +1290,41 @@ function renderAthleteTracker(){
 
 // ── RENDER PROSPETTO ──────────────────────────────────────
 function renderProspetto(){
+  const C=getC();
   const sel=ALL.filter(r=>selectedIds.has(r.id)).sort((a,b)=>pts(b)-pts(a));
   const ec={};
   sel.forEach(r=>ec[r.ev]=(ec[r.ev]||0)+1);
+
+  // Aggiorna titolo dinamico
+  document.getElementById('pros-title').textContent=`Prospetto Scheda — ${C.nSel} risultati`;
+
+  // Calcola pareggi: risultati NON selezionati con stesso punteggio nella stessa gara
+  const tieMap={};
+  sel.filter(r=>!r.isStaffetta).forEach(r=>{
+    const p=pts(r);
+    if (!p) return;
+    const alts=activeAll().filter(x=>x.ev===r.ev&&!x.isStaffetta&&!selectedIds.has(x.id)&&pts(x)===p);
+    if (alts.length) tieMap[r.id]=alts;
+  });
+  const tieIds=Object.keys(tieMap);
+  const tiePanel=document.getElementById('tie-panel');
+  if (tieIds.length){
+    tiePanel.style.display='';
+    tiePanel.innerHTML=`<div class="tie-panel-title">⚠ ${tieIds.length} risultat${tieIds.length===1?'o':'i'} con alternative a pari punteggio (scelti arbitrariamente) — clicca un'alternativa per sostituire:</div>`+
+      tieIds.map(id=>{
+        const r=ALL.find(x=>x.id===+id);
+        const alts=tieMap[id];
+        const altChips=alts.map(a=>`<span class="tie-chip" title="Clicca per sostituire" onclick="swapResult(${r.id},${a.id})">${a.athlete} <span style="color:var(--muted)">${a.perf}</span></span>`).join('');
+        return `<div class="tie-row"><span class="tie-sel">📌 <strong>${r.ev}</strong> — ${r.athlete} (${r.perf})</span><span style="color:var(--muted);margin:0 .3rem">→ anche:</span>${altChips}</div>`;
+      }).join('');
+  } else {
+    tiePanel.style.display='none';
+  }
+
   const tbody=document.getElementById('pros-body');
   if (!sel.length){
     tbody.innerHTML='<tr><td colspan="10" style="padding:2rem;text-align:center;color:var(--muted)">Nessun risultato selezionato.</td></tr>';
+    updateConstraints();
     return;
   }
   tbody.innerHTML=sel.map((r,i)=>{
@@ -1287,11 +1332,12 @@ function renderProspetto(){
     const pVal=userPts[r.id]!==undefined?userPts[r.id]:(r.pts_ok?r.pts:'');
     const dbl=ec[r.ev]===2?'<span class="dbl-badge">×2</span>':'';
     const best=r.isBest?'<span class="best-mark" title="Miglior prestazione nella disciplina">*</span>':'';
+    const tieBadge=tieMap[r.id]?`<span class="tie-badge" title="${tieMap[r.id].length} alternativa/e con uguale punteggio">≡${tieMap[r.id].length}</span>`:'';
     return `<tr class="selected-row">
       <td style="color:var(--muted);font-family:var(--mono);font-size:.72rem">${i+1}</td>
       <td><span class="etype ${r.type}">${TYPE_LBL[r.type]}</span></td>
       <td style="font-weight:600;white-space:nowrap">${r.ev}${dbl}</td>
-      <td style="font-size:.78rem">${athleteDisplay(r)}</td>
+      <td style="font-size:.78rem">${athleteDisplay(r)}${tieBadge}</td>
       <td class="perf">${best}${r.perf}${r.wind?` <span style="font-size:.68rem;color:var(--muted)">${r.wind}</span>`:''}</td>
       <td style="font-size:.75rem;color:var(--muted)">${r.piazz||''}</td>
       <td style="font-size:.75rem;color:var(--muted);white-space:nowrap">${r.citta||''}</td>
@@ -1306,6 +1352,12 @@ function renderProspetto(){
     </tr>`;
   }).join('');
   updateConstraints();
+}
+
+function swapResult(oldId, newId){
+  selectedIds.delete(oldId);
+  selectedIds.add(newId);
+  renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
 }
 
 // ── RENDER ALL RESULTS ────────────────────────────────────
