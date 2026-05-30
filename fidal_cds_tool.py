@@ -578,8 +578,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   padding:.2rem .55rem;border-radius:12px;border:1.5px solid var(--border);
   font-weight:500;white-space:nowrap;transition:all .15s}
 .atl-chip.free{border-color:#bde0bd;background:#f0faf4;color:var(--green)}
-.atl-chip.half{border-color:#fcd299;background:#fff8f0;color:var(--orange)}
-.atl-chip.full{border-color:#f5a8a8;background:#fdf0f0;color:var(--red)}
+.atl-chip.half{border-color:#e6c000;background:#fffbe6;color:#7a5200;font-weight:700}
+.atl-chip.full{border-color:#c0392b;background:#fde8e8;color:#c0392b;font-weight:700}
 .atl-cnt{font-family:var(--mono);font-size:.65rem;font-weight:700}
 
 /* FILTERS */
