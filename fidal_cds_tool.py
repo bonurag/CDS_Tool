@@ -479,6 +479,9 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   border:1.5px solid var(--blue);color:var(--blue);padding:.2rem .65rem;
   border-radius:5px;cursor:pointer;transition:all .15s;white-space:nowrap}
 .btn-refresh-cache:hover{background:var(--blue);color:#fff}
+.btn-refresh-cache:disabled{opacity:.5;cursor:not-allowed}
+@keyframes bspin{to{transform:rotate(360deg)}}
+.bspin{display:inline-block;animation:bspin .8s linear infinite}
 .url-preview{margin-top:.75rem;font-family:var(--mono);font-size:.68rem;
   color:var(--muted);word-break:break-all;padding:.5rem .75rem;
   background:var(--bg);border-radius:5px;border:1px solid var(--border)}
@@ -725,7 +728,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 <!-- LOADING OVERLAY -->
 <div class="loading-overlay hidden" id="loading">
   <div class="spinner"></div>
-  <p>Caricamento dati FIDAL...</p>
+  <p id="loading-msg">Caricamento dati FIDAL…</p>
 </div>
 
 <!-- ══════════════ SCREEN 1: FORM ══════════════ -->
@@ -1310,50 +1313,88 @@ async function fetchData(){
   }
 }
 
+function _setLoadingMsg(msg){ document.getElementById('loading-msg').textContent = msg; }
+
+function _proiezioneParams(p, force){
+  return new URLSearchParams({
+    anno: p.anno, tipo_attivita: p.tipo_attivita, sesso: p.sesso,
+    categoria: p.categoria, regione: p.regione,
+    nazionalita: p.nazionalita, vento: p.vento,
+    force: force ? '1' : '0',
+  });
+}
+
+function _applyProiezioneData(json, p){
+  ALL = json.data;
+  selectedIds.clear(); userPts = {}; staffAnalysis = []; excludedEvs = new Set();
+  unavailableAthletes = new Set(); minDateFilter = null; isProiezione = true;
+  computeBests();
+  ALL.filter(r=>r.isStaffetta).forEach(r=>{ r.staffAthl = resolveStaffettaAthletes(r.rawStaff); });
+  _pruneForProiezione(2);
+}
+
+function _setProiezioneBannerTs(json){
+  if (!json.updated_at) return;
+  const d = new Date(json.updated_at);
+  const fmt = d.toLocaleString('it-IT',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
+  document.getElementById('proiezione-ts').textContent =
+    json.from_cache ? `📦 cache · ${fmt}` : `🌐 aggiornato · ${fmt}`;
+}
+
 async function fetchProiezione(forceRefresh=false){
+  // Se siamo già sul tool screen, usa il refresh in background (no overlay bloccante)
+  const onTool = document.getElementById('scr-tool').classList.contains('active');
+  if (forceRefresh && onTool){ _bgRefreshProiezione(); return; }
+
   const errEl = document.getElementById('form-error');
   errEl.style.display='none';
   const p = getFormParams();
 
+  _setLoadingMsg('Connessione a FIDAL…');
   document.getElementById('loading').classList.remove('hidden');
   try {
-    const params = new URLSearchParams({
-      anno: p.anno, tipo_attivita: p.tipo_attivita, sesso: p.sesso,
-      categoria: p.categoria, regione: p.regione,
-      nazionalita: p.nazionalita, vento: p.vento,
-      force: forceRefresh ? '1' : '0',
-    });
-    const resp = await fetch('/api/proiezione?' + params);
+    const resp = await fetch('/api/proiezione?' + _proiezioneParams(p, forceRefresh));
     const json = await resp.json();
     if (!json.ok) throw new Error(json.error);
 
-    ALL = json.data;
-    selectedIds.clear(); userPts = {}; staffAnalysis = []; excludedEvs = new Set();
-    unavailableAthletes = new Set(); minDateFilter = null; isProiezione = true;
-
-    computeBests();
-    ALL.filter(r=>r.isStaffetta).forEach(r=>{
-      r.staffAthl = resolveStaffettaAthletes(r.rawStaff);
-    });
-    _pruneForProiezione(2);
-
+    _setLoadingMsg(json.from_cache ? 'Caricamento dalla cache…' : 'Analisi risultati…');
+    _applyProiezioneData(json, p);
     setupToolScreen(p);
-
-    // Mostra timestamp cache nel banner
-    if (json.updated_at){
-      const d = new Date(json.updated_at);
-      const fmt = d.toLocaleString('it-IT',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
-      document.getElementById('proiezione-ts').textContent =
-        json.from_cache ? `📦 cache · ${fmt}` : `🌐 aggiornato ora · ${fmt}`;
-    }
-
+    _setProiezioneBannerTs(json);
     show('scr-tool');
     applyPresetCds();
+    _setLoadingMsg('Calcolo punteggio ottimale…');
     computeOptimal();
   } catch(e){
     errEl.style.display='block'; errEl.textContent='Errore: ' + e.message;
-  } finally {
     document.getElementById('loading').classList.add('hidden');
+  }
+}
+
+async function _bgRefreshProiezione(){
+  const btn = document.getElementById('btn-refresh-cache');
+  const ts  = document.getElementById('proiezione-ts');
+  const p   = getFormParams();
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="bspin">⟳</span> Scaricamento…';
+  ts.textContent = '';
+
+  try {
+    const resp = await fetch('/api/proiezione?' + _proiezioneParams(p, true));
+    const json = await resp.json();
+    if (!json.ok) throw new Error(json.error);
+
+    btn.innerHTML = '<span class="bspin">⟳</span> Calcolo ottimale…';
+    _applyProiezioneData(json, p);
+    _setProiezioneBannerTs(json);
+    applyPresetCds();
+    computeOptimal(); // mostra il proprio overlay per la fase di calcolo
+  } catch(e){
+    ts.textContent = `⚠ ${e.message}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔄 Aggiorna dati';
   }
 }
 
@@ -2260,6 +2301,7 @@ function computeOptimal(){
       renderStaffettaAnalysis();
     } finally {
       document.getElementById('loading').classList.add('hidden');
+      _setLoadingMsg('Caricamento dati FIDAL…'); // ripristina messaggio di default
     }
   }, 50);
 }
