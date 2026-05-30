@@ -282,7 +282,7 @@ def api_proiezione():
 
     try:
         p = {'anno':anno,'tipo_attivita':tipo,'sesso':sesso,'categoria':cat,
-             'regione':reg,'nazionalita':naz,'vento':vento,'limite':'5','societa':''}
+             'regione':reg,'nazionalita':naz,'vento':vento,'limite':'10','societa':''}
         data, _ = _do_fidal_fetch(p)
         updated_at = time.strftime('%Y-%m-%dT%H:%M:%S')
         with open(cache_path, 'w', encoding='utf-8') as f:
@@ -1313,7 +1313,7 @@ async function fetchData(){
   }
 }
 
-function _setLoadingMsg(msg){ document.getElementById('loading-msg').textContent = msg; }
+function _setLoadingMsg(msg){ const el=document.getElementById('loading-msg'); if(el) el.textContent=msg; }
 
 function _proiezioneParams(p, force){
   return new URLSearchParams({
@@ -1349,7 +1349,9 @@ async function fetchProiezione(forceRefresh=false){
   const errEl = document.getElementById('form-error');
   errEl.style.display='none';
   const p = getFormParams();
+  let fetchOk = false;
 
+  // ── Fase 1: fetch (overlay gestito qui, con finally garantito) ──────────────
   _setLoadingMsg('Connessione a FIDAL…');
   document.getElementById('loading').classList.remove('hidden');
   try {
@@ -1357,45 +1359,55 @@ async function fetchProiezione(forceRefresh=false){
     const json = await resp.json();
     if (!json.ok) throw new Error(json.error);
 
-    _setLoadingMsg(json.from_cache ? 'Caricamento dalla cache…' : 'Analisi risultati…');
+    _setLoadingMsg(json.from_cache ? 'Lettura cache…' : 'Elaborazione risultati…');
     _applyProiezioneData(json, p);
     setupToolScreen(p);
     _setProiezioneBannerTs(json);
     show('scr-tool');
     applyPresetCds();
-    _setLoadingMsg('Calcolo punteggio ottimale…');
-    computeOptimal();
+    fetchOk = true;
   } catch(e){
     errEl.style.display='block'; errEl.textContent='Errore: ' + e.message;
+  } finally {
+    // L'overlay della fetch viene sempre chiuso qui
     document.getElementById('loading').classList.add('hidden');
+    _setLoadingMsg('Caricamento dati FIDAL…');
   }
+
+  // ── Fase 2: ottimizzatore (gestisce il proprio overlay autonomamente) ────────
+  if (fetchOk) computeOptimal();
 }
 
 async function _bgRefreshProiezione(){
   const btn = document.getElementById('btn-refresh-cache');
   const ts  = document.getElementById('proiezione-ts');
   const p   = getFormParams();
+  let fetchOk = false;
 
   btn.disabled = true;
   btn.innerHTML = '<span class="bspin">⟳</span> Scaricamento…';
   ts.textContent = '';
 
+  // ── Fase 1: fetch in background, nessun overlay bloccante ──────────────────
   try {
     const resp = await fetch('/api/proiezione?' + _proiezioneParams(p, true));
     const json = await resp.json();
     if (!json.ok) throw new Error(json.error);
 
-    btn.innerHTML = '<span class="bspin">⟳</span> Calcolo ottimale…';
     _applyProiezioneData(json, p);
     _setProiezioneBannerTs(json);
     applyPresetCds();
-    computeOptimal(); // mostra il proprio overlay per la fase di calcolo
+    fetchOk = true;
+    btn.innerHTML = '<span class="bspin">⟳</span> Calcolo…';
   } catch(e){
     ts.textContent = `⚠ ${e.message}`;
   } finally {
     btn.disabled = false;
     btn.textContent = '🔄 Aggiorna dati';
   }
+
+  // ── Fase 2: ottimizzatore (gestisce il proprio overlay autonomamente) ────────
+  if (fetchOk) computeOptimal();
 }
 
 function setupToolScreen(p){
