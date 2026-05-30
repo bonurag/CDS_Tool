@@ -435,9 +435,21 @@ def api_proiezione_build():
                     if results:
                         all_results.extend(results)
                         found_soc += 1
+                        n_athl = len({r['athlete'] for r in results
+                                      if not r.get('isStaffetta', False)})
+                        # Verifica se la società può formare una scheda valida
+                        _lanci = {'peso','martello','giavellotto','disco','lancio','vortex','palla'}
+                        _salti = {'lungo','triplo','alto','asta','salto'}
+                        ev_set = {r['ev'] for r in results if not r.get('isStaffetta', False)}
+                        n_ev = len(ev_set)
+                        n_la = sum(1 for ev in ev_set if any(k in ev.lower() for k in _lanci))
+                        n_sa = sum(1 for ev in ev_set if any(k in ev.lower() for k in _salti))
+                        can_compete = n_ev >= 10 and n_la >= 2 and n_sa >= 2
                         yield _ev({'type': 'found', 'soc': soc['nome'],
-                                   'n': len(results), 'done': i+1,
-                                   'total': total, 'found': found_soc})
+                                   'n': len(results), 'n_athl': n_athl,
+                                   'n_ev': n_ev, 'n_la': n_la, 'n_sa': n_sa,
+                                   'can_compete': can_compete,
+                                   'done': i+1, 'total': total, 'found': found_soc})
                     else:
                         yield _ev({'type': 'skip', 'soc': soc['nome'],
                                    'done': i+1, 'total': total, 'found': found_soc})
@@ -572,6 +584,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 .loading-overlay p{color:#fff;font-family:var(--head);font-size:1rem;font-weight:600}
+.loading-bar-track{width:280px;height:5px;background:rgba(255,255,255,.2);border-radius:3px;overflow:hidden}
+.loading-bar-fill{height:100%;border-radius:3px;background:var(--accent);width:0%;transition:width .25s}
+@keyframes indeterminate{0%{left:-40%;width:40%}100%{left:100%;width:40%}}
+.loading-bar-fill.indeterminate{position:relative;animation:indeterminate 1.2s ease infinite;width:40%!important}
 .error-msg{background:#fdf0f0;border:1.5px solid var(--red);color:var(--red);
   border-radius:7px;padding:.75rem 1rem;font-size:.82rem;margin-top:1rem}
 
@@ -806,6 +822,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 <div class="loading-overlay hidden" id="loading">
   <div class="spinner"></div>
   <p id="loading-msg">Caricamento dati FIDAL…</p>
+  <div class="loading-bar-track" id="loading-bar-track" style="display:none">
+    <div class="loading-bar-fill indeterminate" id="loading-bar-fill"></div>
+  </div>
+  <p id="loading-sub" style="font-size:.72rem;color:rgba(255,255,255,.55);font-weight:400;margin-top:-.5rem"></p>
 </div>
 
 <!-- ══════════════ SCREEN 1: FORM ══════════════ -->
@@ -1406,7 +1426,7 @@ async function fetchData(){
 function _setLoadingMsg(msg){ const el=document.getElementById('loading-msg'); if(el) el.textContent=msg; }
 
 // ── BUILD DB REGIONALE (SSE) ─────────────────────────────
-let _buildES = null;
+let _buildES = null, _buildCompete = 0;
 
 function startBuildProiezione(){
   const p = getFormParams();
@@ -1439,13 +1459,19 @@ function startBuildProiezione(){
     }
     else if (msg.type === 'total'){
       status.textContent = `0/${msg.n} società analizzate · 0 con ${p.categoria}`;
+      _buildCompete = 0;
     }
     else if (msg.type === 'found' || msg.type === 'skip'){
       const pct = Math.round(msg.done / msg.total * 100);
       fill.style.width = pct + '%';
-      status.textContent = `${msg.done}/${msg.total} analizzate · ${msg.found} con ${p.categoria}`;
+      if (msg.type === 'found' && msg.can_compete) _buildCompete++;
+      status.textContent = `${msg.done}/${msg.total} analizzate · ${msg.found} con ${p.categoria} · 🏆 ${_buildCompete} competitive`;
       if (msg.type === 'found'){
-        log.innerHTML += `<div>✅ ${msg.soc} — ${msg.n} risultati</div>`;
+        const badge = msg.can_compete ? '🏆' : '⚠';
+        const hint  = msg.can_compete
+          ? `${msg.n_ev} gare · ${msg.n_la} lanci · ${msg.n_sa} salti`
+          : `solo ${msg.n_ev} gare (min 10), ${msg.n_la} lanci, ${msg.n_sa} salti`;
+        log.innerHTML += `<div>${badge} ${msg.soc} — ${msg.n_athl} atlet${p.sesso==='F'?'e':'i'} · ${hint}</div>`;
         log.scrollTop = log.scrollHeight;
       }
     }
@@ -1454,7 +1480,7 @@ function startBuildProiezione(){
       fill.style.width = '100%';
       const d = new Date(msg.updated_at);
       const fmt = d.toLocaleString('it-IT',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
-      status.textContent = `✅ Completato — ${msg.n_results} risultati da ${msg.found_societies} società · ${fmt}`;
+      status.textContent = `✅ Completato — ${msg.found_societies} società (🏆 ${_buildCompete} competitive) · ${msg.n_results} prestazioni · ${fmt}`;
       log.innerHTML += `<div style="font-weight:600;color:var(--green)">Dati salvati in cache. Avvio proiezione...</div>`;
       log.scrollTop = log.scrollHeight;
       setTimeout(() => {
@@ -2267,13 +2293,16 @@ function _afterGlobalFilter(){
 // ── OTTIMIZZAZIONE ────────────────────────────────────────
 
 function _pruneForProiezione(nPerEv){
-  // Mantieni solo i top nPerEv risultati per disciplina (per pts desc)
+  // Per le staffette: tieni solo il top 1 per disciplina (migliore della regione).
+  // Senza questo limite, 30 società × 1 staffetta = 2^30 combinazioni → browser congelato.
+  // Per le gare individuali: tieni i top nPerEv (per gestire conflitti atleti).
   const byEv = {};
   ALL.forEach(r => { (byEv[r.ev] = byEv[r.ev]||[]).push(r); });
   const keep = new Set();
   for (const ers of Object.values(byEv)){
     ers.sort((a,b)=>(pts(b)||0)-(pts(a)||0));
-    ers.slice(0, nPerEv).forEach(r=>keep.add(r.id));
+    const n = ers[0]?.isStaffetta ? 1 : nPerEv;
+    ers.slice(0, n).forEach(r=>keep.add(r.id));
   }
   ALL = ALL.filter(r=>keep.has(r.id));
 }
@@ -2434,19 +2463,35 @@ function computeOptimal(){
     return;
   }
   setNoteEst('');
+  // Mostra overlay con barra di avanzamento indeterminata
+  _setLoadingMsg('Calcolo punteggio ottimale…');
+  const _lbar = document.getElementById('loading-bar-track');
+  const _lsub = document.getElementById('loading-sub');
+  if (_lbar) _lbar.style.display = '';
   document.getElementById('loading').classList.remove('hidden');
   setTimeout(()=>{
     try {
       const allStaff=activeAll().filter(r=>r.isStaffetta);
       const n=allStaff.length;
+      // Calcola stima combinazioni per il messaggio informativo
+      const evList=[...new Set(activeAll().filter(r=>!r.isStaffetta).map(r=>r.ev))];
+      const C=getC();
+      const maxD = isProiezione ? 1 : C.nSel-C.minEv;
+      const nEvs=evList.length;
+      let estCombs=0;
+      for(let nEv=C.minEv;nEv<=Math.min(C.nSel,nEvs);nEv++){
+        const nD=C.nSel-nEv; if(nD>maxD) continue;
+        // stima grossolana C(nEvs,nEv)
+        let c=1; for(let i=0;i<Math.min(nEv,nEvs-nEv);i++) c=c*(nEvs-i)/(i+1);
+        estCombs+=Math.round(c);
+      }
+      if(_lsub) _lsub.textContent=`~${estCombs.toLocaleString('it')} combinazioni · ${nEvs} gare · ${(1<<n)} conf. staffette`;
       let bestTotal=-1,bestSel=null;
       staffAnalysis=[];
       topCombinations=[];
 
       // Tutti i sottoinsiemi di staffette (2^n)
-      const C=getC();
       // In proiezione max 1 doppiatura: riduce C(17,10)×C(17,3)≈13M → C(17,12)×17≈105K iterazioni
-      const maxD = isProiezione ? 1 : undefined;
       for (let mask=0;mask<(1<<n);mask++){
         const incl=allStaff.filter((_,i)=>mask&(1<<i));
         const {total,sel}=searchOptimal(incl, maxD);
@@ -2478,7 +2523,9 @@ function computeOptimal(){
       renderStaffettaAnalysis();
     } finally {
       document.getElementById('loading').classList.add('hidden');
-      _setLoadingMsg('Caricamento dati FIDAL…'); // ripristina messaggio di default
+      _setLoadingMsg('Caricamento dati FIDAL…');
+      if (_lbar) _lbar.style.display='none';
+      if (_lsub) _lsub.textContent='';
     }
   }, 50);
 }
