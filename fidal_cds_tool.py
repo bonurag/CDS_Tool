@@ -204,6 +204,43 @@ def parse_graduatorie(html):
 
 # ── API ──────────────────────────────────────────────────────────────────────
 
+_FIDAL_HDRS = {
+    'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                   'AppleWebKit/537.36 (KHTML, like Gecko) '
+                   'Chrome/124.0.0.0 Safari/537.36'),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Referer': 'https://www.fidal.it/graduatorie.php',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+}
+
+def _do_fidal_fetch(p):
+    """Fetches graduatorie from FIDAL, parses and enriches with local score tables.
+    Returns list of result dicts. Raises ValueError/requests.HTTPError on failure."""
+    fp = dict(p)
+    fp.update({'gara':'0','tipologia_estrazione':'2','submit':'Invia'})
+    sess = requests.Session()
+    sess.headers.update(_FIDAL_HDRS)
+    try:
+        sess.get('https://www.fidal.it/graduatorie.php', timeout=8)
+    except Exception:
+        pass
+    r = sess.post('https://www.fidal.it/graduatorie.php', data=fp, timeout=20)
+    r.raise_for_status()
+    data = parse_graduatorie(r.text)
+    if not data:
+        snippet = r.text[:500].replace('\n', ' ')
+        raise ValueError(f'Nessun risultato trovato. '
+                         f'(HTML: {len(r.text)} byte, snippet: {snippet[:120]}…)')
+    categoria = fp.get('categoria', '')
+    for row in data:
+        pts, found = _lookup_pts(row['ev'], row['perf'], categoria)
+        row['pts']    = pts
+        row['pts_ok'] = found
+    return data, r.url
+
 @app.route('/api/fetch')
 def api_fetch():
     try:
@@ -212,42 +249,49 @@ def api_fetch():
             ('categoria','CF'),('vento','2'),('regione','LOM'),
             ('nazionalita','0'),('limite','100'),('societa',''),
         ]}
-        p.update({'gara':'0','tipologia_estrazione':'2','submit':'Invia'})
-        hdrs = {
-            'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                           'AppleWebKit/537.36 (KHTML, like Gecko) '
-                           'Chrome/124.0.0.0 Safari/537.36'),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://www.fidal.it/graduatorie.php',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        }
-        sess = requests.Session()
-        sess.headers.update(hdrs)
-        # Prima richiesta GET senza parametri per ottenere i cookie di sessione
-        try:
-            sess.get('https://www.fidal.it/graduatorie.php', timeout=8)
-        except Exception:
-            pass
-        r = sess.post('https://www.fidal.it/graduatorie.php', data=p, timeout=20)
-        r.raise_for_status()
-        data = parse_graduatorie(r.text)
-        if not data:
-            snippet = r.text[:500].replace('\n',' ')
-            return jsonify({'ok':False,
-                'error':f'Nessun risultato trovato. Verifica i parametri. '
-                        f'(HTML ricevuto: {len(r.text)} byte, snippet: {snippet[:120]}…)'})
-        # Arricchisci con punteggi dalla tabella locale
-        categoria = p.get('categoria', '')
-        for row in data:
-            pts, found = _lookup_pts(row['ev'], row['perf'], categoria)
-            row['pts']    = pts
-            row['pts_ok'] = found
-        return jsonify({'ok':True,'data':data,'url':r.url})
+        data, url = _do_fidal_fetch(p)
+        return jsonify({'ok':True,'data':data,'url':url})
     except Exception as e:
         return jsonify({'ok':False,'error':str(e)}), 500
+
+def _proiezione_cache_path(anno, tipo, sesso, cat, reg):
+    fname = f'proiezione_{anno}_{tipo}_{sesso}_{cat}_{reg}.json'
+    return os.path.join(_data_dir(), fname)
+
+@app.route('/api/proiezione')
+def api_proiezione():
+    anno  = request.args.get('anno',  '2026')
+    tipo  = request.args.get('tipo_attivita', 'P')
+    sesso = request.args.get('sesso', 'F')
+    cat   = request.args.get('categoria', 'CF')
+    reg   = request.args.get('regione', 'LOM')
+    naz   = request.args.get('nazionalita', '0')
+    vento = request.args.get('vento', '2')
+    force = request.args.get('force', '0') == '1'
+
+    cache_path = _proiezione_cache_path(anno, tipo, sesso, cat, reg)
+
+    if not force and os.path.exists(cache_path):
+        try:
+            with open(cache_path, encoding='utf-8') as f:
+                cached = json.load(f)
+            return jsonify({'ok': True, 'from_cache': True,
+                            'data': cached['data'], 'updated_at': cached['updated_at']})
+        except Exception:
+            pass  # cache corrotta → rifetch
+
+    try:
+        p = {'anno':anno,'tipo_attivita':tipo,'sesso':sesso,'categoria':cat,
+             'regione':reg,'nazionalita':naz,'vento':vento,'limite':'5','societa':''}
+        data, _ = _do_fidal_fetch(p)
+        updated_at = time.strftime('%Y-%m-%dT%H:%M:%S')
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump({'data': data, 'updated_at': updated_at}, f,
+                      ensure_ascii=False, indent=2)
+        return jsonify({'ok': True, 'from_cache': False,
+                        'data': data, 'updated_at': updated_at})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
 
 @app.route('/')
 def index():
@@ -429,7 +473,12 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 .btn-secondary:hover{background:var(--blue);color:#fff}
 .proiezione-bar{background:#e8f0fe;border-bottom:2px solid var(--blue2);
   padding:.55rem 2rem;font-size:.8rem;color:var(--blue);font-weight:600;
-  display:flex;align-items:center;gap:.5rem}
+  display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
+.btn-refresh-cache{font-family:var(--head);font-size:.73rem;font-weight:700;
+  letter-spacing:.04em;text-transform:uppercase;background:transparent;
+  border:1.5px solid var(--blue);color:var(--blue);padding:.2rem .65rem;
+  border-radius:5px;cursor:pointer;transition:all .15s;white-space:nowrap}
+.btn-refresh-cache:hover{background:var(--blue);color:#fff}
 .url-preview{margin-top:.75rem;font-family:var(--mono);font-size:.68rem;
   color:var(--muted);word-break:break-all;padding:.5rem .75rem;
   background:var(--bg);border-radius:5px;border:1px solid var(--border)}
@@ -822,7 +871,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 
   <!-- Proiezione banner -->
   <div class="proiezione-bar" id="proiezione-bar" style="display:none">
-    📊 <strong>Modalità Proiezione Regionale</strong> — punteggio teorico massimo con i migliori atleti della regione. Risultati senza punteggio tabella esclusi automaticamente.
+    <span>📊 <strong>Proiezione Regionale</strong> — punteggio teorico massimo (top atleti per disciplina, max 1 doppiatura).</span>
+    <span id="proiezione-ts" style="font-size:.75rem;opacity:.8"></span>
+    <span style="margin-left:auto"></span>
+    <button class="btn-refresh-cache" onclick="fetchProiezione(true)">🔄 Aggiorna dati</button>
   </div>
 
   <!-- Constraints -->
@@ -1258,16 +1310,20 @@ async function fetchData(){
   }
 }
 
-async function fetchProiezione(){
+async function fetchProiezione(forceRefresh=false){
   const errEl = document.getElementById('form-error');
   errEl.style.display='none';
   const p = getFormParams();
-  p.societa = '';   // nessun filtro società
-  p.limite  = '5'; // top 5 per disciplina — bastano per trovare l'ottimo
 
   document.getElementById('loading').classList.remove('hidden');
   try {
-    const resp = await fetch('/api/fetch?' + new URLSearchParams(p));
+    const params = new URLSearchParams({
+      anno: p.anno, tipo_attivita: p.tipo_attivita, sesso: p.sesso,
+      categoria: p.categoria, regione: p.regione,
+      nazionalita: p.nazionalita, vento: p.vento,
+      force: forceRefresh ? '1' : '0',
+    });
+    const resp = await fetch('/api/proiezione?' + params);
     const json = await resp.json();
     if (!json.ok) throw new Error(json.error);
 
@@ -1279,14 +1335,19 @@ async function fetchProiezione(){
     ALL.filter(r=>r.isStaffetta).forEach(r=>{
       r.staffAthl = resolveStaffettaAthletes(r.rawStaff);
     });
-
-    // Pruning: max 2 risultati per disciplina (sufficiente per ottimizzatore)
     _pruneForProiezione(2);
 
     setupToolScreen(p);
-    show('scr-tool');
 
-    // Auto-applica preset CdS e avvia ottimizzatore
+    // Mostra timestamp cache nel banner
+    if (json.updated_at){
+      const d = new Date(json.updated_at);
+      const fmt = d.toLocaleString('it-IT',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
+      document.getElementById('proiezione-ts').textContent =
+        json.from_cache ? `📦 cache · ${fmt}` : `🌐 aggiornato ora · ${fmt}`;
+    }
+
+    show('scr-tool');
     applyPresetCds();
     computeOptimal();
   } catch(e){
