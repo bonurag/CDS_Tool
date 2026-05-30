@@ -1262,8 +1262,8 @@ async function fetchProiezione(){
   const errEl = document.getElementById('form-error');
   errEl.style.display='none';
   const p = getFormParams();
-  p.societa = '';    // nessun filtro società
-  p.limite  = '30'; // top 30 per disciplina
+  p.societa = '';   // nessun filtro società
+  p.limite  = '5'; // top 5 per disciplina — bastano per trovare l'ottimo
 
   document.getElementById('loading').classList.remove('hidden');
   try {
@@ -1279,6 +1279,9 @@ async function fetchProiezione(){
     ALL.filter(r=>r.isStaffetta).forEach(r=>{
       r.staffAthl = resolveStaffettaAthletes(r.rawStaff);
     });
+
+    // Pruning: max 2 risultati per disciplina (sufficiente per ottimizzatore)
+    _pruneForProiezione(2);
 
     setupToolScreen(p);
     show('scr-tool');
@@ -1983,6 +1986,18 @@ function _afterGlobalFilter(){
 }
 
 // ── OTTIMIZZAZIONE ────────────────────────────────────────
+
+function _pruneForProiezione(nPerEv){
+  // Mantieni solo i top nPerEv risultati per disciplina (per pts desc)
+  const byEv = {};
+  ALL.forEach(r => { (byEv[r.ev] = byEv[r.ev]||[]).push(r); });
+  const keep = new Set();
+  for (const ers of Object.values(byEv)){
+    ers.sort((a,b)=>(pts(b)||0)-(pts(a)||0));
+    ers.slice(0, nPerEv).forEach(r=>keep.add(r.id));
+  }
+  ALL = ALL.filter(r=>keep.has(r.id));
+}
 function* combIter(arr, k){
   const n=arr.length;
   if (k===0){yield[];return;} if (k>n) return;
@@ -2064,14 +2079,17 @@ function assignBest(evSub, dblSet, inclStaff){
   return {sel, total:sel.reduce((s,r)=>s+pts(r),0)};
 }
 
-function searchOptimal(inclStaff){
+function searchOptimal(inclStaff, maxDoubles){
   const C=getC();
+  // In proiezione limita le doppiature per ridurre la complessità combinatoria
+  const maxD = maxDoubles !== undefined ? maxDoubles : C.nSel-C.minEv;
   const staffEvs=new Set(inclStaff.map(r=>r.ev));
   const evList=[...new Set(activeAll().filter(r=>!r.isStaffetta||staffEvs.has(r.ev)).map(r=>r.ev))];
   const dbl=evList.filter(ev=>activeAll().filter(r=>r.ev===ev).length>=2);
   let best=-1,bestSel=null;
   for (let nEv=C.minEv;nEv<=Math.min(C.nSel,evList.length);nEv++){
     const nD=C.nSel-nEv;
+    if (nD > maxD) continue; // salta se richiede troppe doppiature
     for (const evSub of combIter(evList,nEv)){
       let nl=0,ns=0;
       for (const ev of evSub){if(isLancio(ev))nl++;if(isSalto(ev))ns++;}
@@ -2148,9 +2166,11 @@ function computeOptimal(){
 
       // Tutti i sottoinsiemi di staffette (2^n)
       const C=getC();
+      // In proiezione max 1 doppiatura: riduce C(17,10)×C(17,3)≈13M → C(17,12)×17≈105K iterazioni
+      const maxD = isProiezione ? 1 : undefined;
       for (let mask=0;mask<(1<<n);mask++){
         const incl=allStaff.filter((_,i)=>mask&(1<<i));
-        const {total,sel}=searchOptimal(incl);
+        const {total,sel}=searchOptimal(incl, maxD);
         if (sel&&sel.length===C.nSel){
           const inclLabel=incl.length?incl.map(r=>r.ev).join(' + '):'nessuna staffetta';
           topCombinations.push({total,sel:[...sel],inclStaff:inclLabel});
