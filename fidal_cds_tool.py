@@ -4,7 +4,7 @@ FIDAL CdS Tool — Scheda Provinciale Cadette/Cadetti
 Uso: python fidal_cds_tool.py
 Poi apri http://localhost:5001
 """
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, stream_with_context
 import requests
 from bs4 import BeautifulSoup
 import re, sys, threading, time, webbrowser, json, os
@@ -354,56 +354,117 @@ def api_manual_delete(saved_id):
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)})
 
+def _fetch_society_list(regione):
+    """Scarica e restituisce la lista società di una regione da mappa.php."""
+    url = f'https://www.fidal.it/mappa.php?x=1&regione={regione}'
+    hdrs = {
+        'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                       'AppleWebKit/537.36 (KHTML, like Gecko) '
+                       'Chrome/124.0.0.0 Safari/537.36'),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': 'https://www.fidal.it/mappa.php',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    }
+    sess = requests.Session()
+    sess.headers.update(hdrs)
+    try:
+        sess.get('https://www.fidal.it/mappa.php', timeout=8)
+    except Exception:
+        pass
+    r = sess.get(url, timeout=15)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, 'html.parser')
+    seen, result = set(), []
+    for a in soup.find_all('a', href=re.compile(r'/societa/[^/]+/[A-Z]{2}\d')):
+        m = re.search(r'/([A-Z]{2}\d+)$', a['href'])
+        if m:
+            cod  = m.group(1)
+            nome = a.get_text(strip=True)
+            if cod not in seen and nome:
+                seen.add(cod)
+                result.append({'cod': cod, 'nome': nome})
+    result.sort(key=lambda x: x['nome'])
+    return result
+
 @app.route('/api/societa')
 def api_societa():
     regione = request.args.get('regione', '').strip().upper()
     if not regione:
         return jsonify({'ok': False, 'error': 'Regione mancante'})
     try:
-        url = f'https://www.fidal.it/mappa.php?x=1&regione={regione}'
-        hdrs = {
-            'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                           'AppleWebKit/537.36 (KHTML, like Gecko) '
-                           'Chrome/124.0.0.0 Safari/537.36'),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://www.fidal.it/mappa.php',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        }
-        sess = requests.Session()
-        sess.headers.update(hdrs)
-        try:
-            sess.get('https://www.fidal.it/mappa.php', timeout=8)
-        except Exception:
-            pass
-        r = sess.get(url, timeout=15)
-        r.raise_for_status()
-
-        # Le società sono in link /societa/NOME-SLUG/CODICE
-        soup = BeautifulSoup(r.text, 'html.parser')
-        societa = []
-        for a in soup.find_all('a', href=re.compile(r'/societa/[^/]+/[A-Z]{2}\d')):
-            m = re.search(r'/([A-Z]{2}\d+)$', a['href'])
-            if m:
-                nome = a.get_text(strip=True)
-                if nome:
-                    societa.append({'cod': m.group(1), 'nome': nome})
-
-        if not societa:
+        data = _fetch_society_list(regione)
+        if not data:
             return jsonify({'ok': False,
                 'error': f'Nessuna società trovata per la regione {regione}.'})
-
-        seen, unique = set(), []
-        for s in societa:
-            if s['cod'] not in seen:
-                seen.add(s['cod'])
-                unique.append(s)
-        unique.sort(key=lambda x: x['nome'])
-        return jsonify({'ok': True, 'data': unique})
+        return jsonify({'ok': True, 'data': data})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)})
+
+@app.route('/api/proiezione/build')
+def api_proiezione_build():
+    anno  = request.args.get('anno',  '2026')
+    tipo  = request.args.get('tipo_attivita', 'P')
+    sesso = request.args.get('sesso', 'F')
+    cat   = request.args.get('categoria', 'CF')
+    reg   = request.args.get('regione', 'LOM')
+    naz   = request.args.get('nazionalita', '0')
+    vento = request.args.get('vento', '2')
+
+    def _ev(d):
+        return f'data: {json.dumps(d, ensure_ascii=False)}\n\n'
+
+    def generate():
+        try:
+            yield _ev({'type': 'status', 'msg': 'Caricamento lista società…'})
+            societies = _fetch_society_list(reg)
+            if not societies:
+                yield _ev({'type': 'error', 'msg': f'Nessuna società trovata per {reg}'}); return
+            total = len(societies)
+            yield _ev({'type': 'total', 'n': total})
+
+            all_results, found_soc = [], 0
+            for i, soc in enumerate(societies):
+                try:
+                    p = {'anno': anno, 'tipo_attivita': tipo, 'sesso': sesso,
+                         'categoria': cat, 'regione': reg, 'nazionalita': naz,
+                         'vento': vento, 'limite': '5', 'societa': soc['cod']}
+                    results, _ = _do_fidal_fetch(p)
+                    if results:
+                        all_results.extend(results)
+                        found_soc += 1
+                        yield _ev({'type': 'found', 'soc': soc['nome'],
+                                   'n': len(results), 'done': i+1,
+                                   'total': total, 'found': found_soc})
+                    else:
+                        yield _ev({'type': 'skip', 'soc': soc['nome'],
+                                   'done': i+1, 'total': total, 'found': found_soc})
+                except Exception:
+                    yield _ev({'type': 'skip', 'soc': soc['nome'],
+                               'done': i+1, 'total': total, 'found': found_soc})
+                time.sleep(0.2)   # delay per non sovraccaricare FIDAL
+
+            if all_results:
+                cache_path = _proiezione_cache_path(anno, tipo, sesso, cat, reg)
+                updated_at = time.strftime('%Y-%m-%dT%H:%M:%S')
+                with open(cache_path, 'w', encoding='utf-8') as f:
+                    json.dump({'data': all_results, 'updated_at': updated_at},
+                              f, ensure_ascii=False, indent=2)
+                yield _ev({'type': 'done', 'n_results': len(all_results),
+                           'found_societies': found_soc, 'updated_at': updated_at})
+            else:
+                yield _ev({'type': 'error',
+                           'msg': f'Nessun risultato {cat} trovato nella regione {reg}'})
+        except Exception as e:
+            yield _ev({'type': 'error', 'msg': str(e)})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
+    )
 
 # ── FRONTEND HTML ─────────────────────────────────────────────────────────────
 
@@ -471,6 +532,22 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   border:1.5px solid var(--blue);color:var(--blue);border-radius:7px;
   padding:.6rem;cursor:pointer;transition:all .15s}
 .btn-secondary:hover{background:var(--blue);color:#fff}
+.btn-build{width:100%;margin-top:.4rem;font-family:var(--head);font-size:.8rem;
+  font-weight:600;letter-spacing:.04em;text-transform:uppercase;background:transparent;
+  border:1.5px solid var(--muted);color:var(--muted);border-radius:7px;
+  padding:.5rem;cursor:pointer;transition:all .15s}
+.btn-build:hover{border-color:var(--blue2);color:var(--blue2)}
+.build-area{margin-top:1rem;padding:1rem;background:var(--bg);border:1.5px solid var(--border);
+  border-radius:8px}
+.build-area h4{font-family:var(--head);font-size:.8rem;font-weight:700;
+  text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:.5rem;
+  display:flex;justify-content:space-between;align-items:center}
+.build-progress-track{background:#dce6f0;border-radius:4px;height:7px;overflow:hidden;margin-bottom:.45rem}
+.build-progress-fill{height:100%;background:var(--blue2);border-radius:4px;
+  transition:width .4s ease;width:0%}
+.build-status{font-size:.75rem;color:var(--text);font-weight:500;margin-bottom:.35rem}
+.build-log{font-size:.68rem;color:var(--muted);max-height:90px;overflow-y:auto;
+  line-height:1.5;border-top:1px solid var(--border);padding-top:.35rem;margin-top:.35rem}
 .proiezione-bar{background:#e8f0fe;border-bottom:2px solid var(--blue2);
   padding:.55rem 2rem;font-size:.8rem;color:var(--blue);font-weight:600;
   display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
@@ -851,7 +928,20 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
       <div class="url-preview" id="url-preview">—</div>
       <div class="error-msg" id="form-error" style="display:none"></div>
       <button class="btn-primary" onclick="fetchData()">⚡ Carica Graduatorie FIDAL</button>
-      <button class="btn-secondary" onclick="fetchProiezione()">📊 Proiezione regionale (senza società)</button>
+      <button class="btn-secondary" onclick="fetchProiezione()">📊 Proiezione regionale (da cache)</button>
+      <button class="btn-build" onclick="startBuildProiezione()">⚙ Costruisci / Aggiorna DB Regionale (analizza tutte le società)</button>
+      <!-- Area progress build -->
+      <div class="build-area" id="build-area" style="display:none">
+        <h4>
+          <span id="build-area-title">Costruzione database regionale</span>
+          <button class="btn-mcancel" style="font-size:.7rem" onclick="cancelBuild()">✕ Annulla</button>
+        </h4>
+        <div class="build-progress-track">
+          <div class="build-progress-fill" id="build-fill"></div>
+        </div>
+        <div class="build-status" id="build-status">In attesa...</div>
+        <div class="build-log" id="build-log"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -1314,6 +1404,81 @@ async function fetchData(){
 }
 
 function _setLoadingMsg(msg){ const el=document.getElementById('loading-msg'); if(el) el.textContent=msg; }
+
+// ── BUILD DB REGIONALE (SSE) ─────────────────────────────
+let _buildES = null;
+
+function startBuildProiezione(){
+  const p = getFormParams();
+  const area = document.getElementById('build-area');
+  const fill = document.getElementById('build-fill');
+  const status = document.getElementById('build-status');
+  const log = document.getElementById('build-log');
+
+  area.style.display = '';
+  fill.style.width = '0%';
+  status.textContent = 'Connessione…';
+  log.innerHTML = '';
+
+  if (_buildES) _buildES.close();
+
+  const params = new URLSearchParams({
+    anno: p.anno, tipo_attivita: p.tipo_attivita, sesso: p.sesso,
+    categoria: p.categoria, regione: p.regione,
+    nazionalita: p.nazionalita, vento: p.vento,
+  });
+
+  _buildES = new EventSource('/api/proiezione/build?' + params);
+
+  _buildES.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch(_){ return; }
+
+    if (msg.type === 'status'){
+      status.textContent = msg.msg;
+    }
+    else if (msg.type === 'total'){
+      status.textContent = `0/${msg.n} società analizzate · 0 con ${p.categoria}`;
+    }
+    else if (msg.type === 'found' || msg.type === 'skip'){
+      const pct = Math.round(msg.done / msg.total * 100);
+      fill.style.width = pct + '%';
+      status.textContent = `${msg.done}/${msg.total} analizzate · ${msg.found} con ${p.categoria}`;
+      if (msg.type === 'found'){
+        log.innerHTML += `<div>✅ ${msg.soc} — ${msg.n} risultati</div>`;
+        log.scrollTop = log.scrollHeight;
+      }
+    }
+    else if (msg.type === 'done'){
+      _buildES.close(); _buildES = null;
+      fill.style.width = '100%';
+      const d = new Date(msg.updated_at);
+      const fmt = d.toLocaleString('it-IT',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
+      status.textContent = `✅ Completato — ${msg.n_results} risultati da ${msg.found_societies} società · ${fmt}`;
+      log.innerHTML += `<div style="font-weight:600;color:var(--green)">Dati salvati in cache. Avvio proiezione...</div>`;
+      log.scrollTop = log.scrollHeight;
+      setTimeout(() => {
+        area.style.display = 'none';
+        fetchProiezione(false);
+      }, 2500);
+    }
+    else if (msg.type === 'error'){
+      _buildES.close(); _buildES = null;
+      status.textContent = `⚠ ${msg.msg}`;
+      fill.style.width = '0%';
+    }
+  };
+
+  _buildES.onerror = () => {
+    if (_buildES){ _buildES.close(); _buildES = null; }
+    status.textContent = '⚠ Connessione interrotta — riprova';
+  };
+}
+
+function cancelBuild(){
+  if (_buildES){ _buildES.close(); _buildES = null; }
+  document.getElementById('build-area').style.display = 'none';
+}
 
 function _proiezioneParams(p, force){
   return new URLSearchParams({
