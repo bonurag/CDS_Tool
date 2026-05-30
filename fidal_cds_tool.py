@@ -1454,7 +1454,8 @@ function renderAthleteTracker(){
     const indC=v.atlIndCount[a]||0;
     const full=c>=2||indC>=C.maxAthlInd;
     const cls = full?'full':c===1?'half':'free';
-    const label=C.maxAthlInd===1?`${indC}/1 ind`:`${indC}/${C.maxAthlInd} ind`;
+    // Mostra il conteggio totale (che determina il colore) + dettaglio individuale
+    const label = c>=2 ? `${c}/2` : `${c}/2 · ${indC} ind`;
     return `<span class="atl-chip ${cls}">${a} <span class="atl-cnt">${label}</span></span>`;
   }).join('');
 }
