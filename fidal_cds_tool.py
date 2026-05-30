@@ -468,7 +468,9 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 .staff-card{border:1.5px solid var(--border);border-radius:8px;padding:.7rem .9rem;
   min-width:260px;flex:1;max-width:460px}
 .staff-card.ok{border-color:var(--green);background:#f0faf4}
-.staff-card.no{border-color:var(--orange);background:#fff8f0}
+.staff-card.warn{border-color:#f0c040;background:#fffbeb}
+.staff-card.no{border-color:var(--red);background:#fdf0f0}
+.scard-verdict.warn{color:#7a5700}
 .scard-head{display:flex;align-items:center;gap:.6rem;margin-bottom:.5rem}
 .scard-ev{font-family:var(--head);font-size:.9rem;font-weight:700}
 .scard-perf{font-family:var(--mono);font-size:.78rem;color:var(--blue)}
@@ -781,7 +783,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
         <div class="form-group">
           <label>Codice Società FIDAL</label>
           <input id="f-societa" type="text" placeholder="es. BS318"
-            value="BS318" style="text-transform:uppercase"
+            style="text-transform:uppercase"
             oninput="onSocietaCodiceInput()">
         </div>
       </div>
@@ -2112,10 +2114,20 @@ function renderStaffettaAnalysis(){
   if (!staffAnalysis.length){container.innerHTML='';return;}
   container.innerHTML=staffAnalysis.map(({staff,tCon,tSenza,delta,inOpt})=>{
     const p=pts(staff);
-    const estCls=(userPts[staff.id]===undefined&&staff.est)?'est':'';
-    const conv=delta>0;
     const chips=(staff.staffAthl||[staff.athlete]).map(a=>`<span class="chip">${a}</span>`).join('');
-    return `<div class="staff-card ${conv?'ok':'no'}">
+    // Determina stato: nell'ottimale / conviene da sola ma esclusa / non conviene
+    let cardCls, verdictCls, verdictTxt;
+    if (inOpt){
+      cardCls='ok'; verdictCls='ok';
+      verdictTxt=`✅ Nell'ottimale · +${delta} pt vs. nessuna staffetta`;
+    } else if (delta>0){
+      cardCls='warn'; verdictCls='warn';
+      verdictTxt=`⚠ Conviene da sola (+${delta} pt) ma esclusa dall'ottimale — un'altra staffetta porta più punti con le stesse atlete`;
+    } else {
+      cardCls='no'; verdictCls='no';
+      verdictTxt=`❌ Non conviene (${delta} pt) — le atlete valgono di più individualmente`;
+    }
+    return `<div class="staff-card ${cardCls}">
       <div class="scard-head">
         <span class="scard-ev">${staff.ev}</span>
         <span class="scard-perf">${staff.perf}</span>
@@ -2126,9 +2138,7 @@ function renderStaffettaAnalysis(){
       <div style="font-size:.7rem;color:var(--muted)">
         Con: <strong>${tCon} pt</strong> &nbsp;|&nbsp; Senza: <strong>${tSenza} pt</strong>
       </div>
-      <div class="scard-verdict ${conv?'ok':'no'}">
-        ${conv?`✅ Conviene +${delta} pt`:`⚠ Non conviene ${delta} pt — atlete più preziose individualmente`}
-      </div>
+      <div class="scard-verdict ${verdictCls}">${verdictTxt}</div>
     </div>`;
   }).join('');
 }
