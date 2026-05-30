@@ -2123,7 +2123,14 @@ function renderStaffettaAnalysis(){
       verdictTxt=`✅ Nell'ottimale · +${delta} pt vs. nessuna staffetta`;
     } else if (delta>0){
       cardCls='warn'; verdictCls='warn';
-      verdictTxt=`⚠ Conviene da sola (+${delta} pt) ma esclusa dall'ottimale — un'altra staffetta porta più punti con le stesse atlete`;
+      // Individua la causa reale dell'esclusione
+      const v2=validate();
+      const athls=staff.staffAthl||[staff.athlete];
+      const bloccate=athls.filter(a=>(v2.atlCount[a]||0)>=2);
+      const motivo = bloccate.length
+        ? `${bloccate.join(', ')} ${bloccate.length===1?'è già':'sono già'} a 2 gare nell'ottimale`
+        : 'le atlete hanno più valore nelle gare individuali dell\'ottimale';
+      verdictTxt=`⚠ Conviene da sola (+${delta} pt) ma esclusa — ${motivo}`;
     } else {
       cardCls='no'; verdictCls='no';
       verdictTxt=`❌ Non conviene (${delta} pt) — le atlete valgono di più individualmente`;
