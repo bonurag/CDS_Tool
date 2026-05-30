@@ -422,6 +422,14 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   font-weight:700;letter-spacing:.05em;text-transform:uppercase;background:var(--blue);
   color:#fff;border:none;border-radius:7px;padding:.75rem;cursor:pointer;transition:opacity .15s}
 .btn-primary:hover{opacity:.88}
+.btn-secondary{width:100%;margin-top:.5rem;font-family:var(--head);font-size:.88rem;
+  font-weight:600;letter-spacing:.04em;text-transform:uppercase;background:transparent;
+  border:1.5px solid var(--blue);color:var(--blue);border-radius:7px;
+  padding:.6rem;cursor:pointer;transition:all .15s}
+.btn-secondary:hover{background:var(--blue);color:#fff}
+.proiezione-bar{background:#e8f0fe;border-bottom:2px solid var(--blue2);
+  padding:.55rem 2rem;font-size:.8rem;color:var(--blue);font-weight:600;
+  display:flex;align-items:center;gap:.5rem}
 .url-preview{margin-top:.75rem;font-family:var(--mono);font-size:.68rem;
   color:var(--muted);word-break:break-all;padding:.5rem .75rem;
   background:var(--bg);border-radius:5px;border:1px solid var(--border)}
@@ -791,6 +799,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
       <div class="url-preview" id="url-preview">—</div>
       <div class="error-msg" id="form-error" style="display:none"></div>
       <button class="btn-primary" onclick="fetchData()">⚡ Carica Graduatorie FIDAL</button>
+      <button class="btn-secondary" onclick="fetchProiezione()">📊 Proiezione regionale (senza società)</button>
     </div>
   </div>
 </div>
@@ -809,6 +818,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
       <span class="tag acc" id="tag-tot">Tot. — pt</span>
     </div>
     <button class="btn-back" onclick="goBack()">← Nuova ricerca</button>
+  </div>
+
+  <!-- Proiezione banner -->
+  <div class="proiezione-bar" id="proiezione-bar" style="display:none">
+    📊 <strong>Modalità Proiezione Regionale</strong> — punteggio teorico massimo con i migliori atleti della regione. Risultati senza punteggio tabella esclusi automaticamente.
   </div>
 
   <!-- Constraints -->
@@ -1059,6 +1073,21 @@ const CDS_PROGRAMS = {
   },
 };
 CDS_PROGRAMS.RF = CDS_PROGRAMS.RM; // stesso programma tecnico dei Ragazzi
+// Cadette: 80hs, 80, 300hs, 300, 1000, 2000, 1200 siepi, Asta, Alto, Lungo, Triplo,
+//          Peso 3kg, Martello 3kg, Disco 1kg, Giavellotto 400g, Staffetta 4x100, Marcia 3km
+CDS_PROGRAMS.CF = ev => {
+  const e = ev.toLowerCase();
+  return (e.includes('80') && (e.includes('piani') || e.includes('ostac') || e.includes('hs'))) ||
+         (e.includes('300') && (e.includes('ostac') || e.includes('piani'))) ||
+         (e.includes('1000') && !e.includes('3x') && !e.includes('3 x')) ||
+         e.includes('2000') || e.includes('1200') ||
+         e.includes('asta') || e.includes('in alto') || e.includes('in lungo') ||
+         e.includes('triplo') ||
+         e.includes('peso') || e.includes('martello') || e.includes('disco') ||
+         e.includes('giavellott') ||
+         (e.includes('staffetta') && e.includes('100')) ||
+         e.includes('marcia');
+};
 
 // ── VINCOLI PER CATEGORIA ────────────────────────────────
 // nSel: risultati totali | minEv: gare minime distinte
@@ -1075,6 +1104,7 @@ let ALL = [], selectedIds = new Set(), userPts = {}, staffAnalysis = [], exclude
 let currentCategoria = '', currentAnno = 2026, savedManualEntries = [];
 let unavailableAthletes = new Set(), minDateFilter = null;
 let societaList = [];
+let isProiezione = false;
 
 function athleteDisplay(r, short=false){
   if (r.isStaffetta) return (r.staffAthl||[r.athlete]).join(' / ');
@@ -1105,6 +1135,8 @@ function activeAll(){
       const d = parseResultDate(r.data);
       if (d && d < minDateFilter) return false;
     }
+    // In proiezione: escludi risultati senza punteggio tabella
+    if (isProiezione && !r.pts_ok && userPts[r.id]===undefined) return false;
     return true;
   });
 }
@@ -1206,7 +1238,7 @@ async function fetchData(){
 
     ALL = json.data;
     selectedIds.clear(); userPts = {}; staffAnalysis = []; excludedEvs = new Set();
-    unavailableAthletes = new Set(); minDateFilter = null;
+    unavailableAthletes = new Set(); minDateFilter = null; isProiezione = false;
 
     // Segna miglior prestazione per disciplina
     computeBests();
@@ -1219,6 +1251,41 @@ async function fetchData(){
     // Popola UI
     setupToolScreen(p);
     show('scr-tool');
+  } catch(e){
+    errEl.style.display='block'; errEl.textContent='Errore: ' + e.message;
+  } finally {
+    document.getElementById('loading').classList.add('hidden');
+  }
+}
+
+async function fetchProiezione(){
+  const errEl = document.getElementById('form-error');
+  errEl.style.display='none';
+  const p = getFormParams();
+  p.societa = '';    // nessun filtro società
+  p.limite  = '30'; // top 30 per disciplina
+
+  document.getElementById('loading').classList.remove('hidden');
+  try {
+    const resp = await fetch('/api/fetch?' + new URLSearchParams(p));
+    const json = await resp.json();
+    if (!json.ok) throw new Error(json.error);
+
+    ALL = json.data;
+    selectedIds.clear(); userPts = {}; staffAnalysis = []; excludedEvs = new Set();
+    unavailableAthletes = new Set(); minDateFilter = null; isProiezione = true;
+
+    computeBests();
+    ALL.filter(r=>r.isStaffetta).forEach(r=>{
+      r.staffAthl = resolveStaffettaAthletes(r.rawStaff);
+    });
+
+    setupToolScreen(p);
+    show('scr-tool');
+
+    // Auto-applica preset CdS e avvia ottimizzatore
+    applyPresetCds();
+    computeOptimal();
   } catch(e){
     errEl.style.display='block'; errEl.textContent='Errore: ' + e.message;
   } finally {
@@ -1242,7 +1309,14 @@ function setupToolScreen(p){
   const cat = document.getElementById('f-cat');
   const catLabel = cat.options[cat.selectedIndex].text;
   const sesso = p.sesso==='F'?'Femminile':'Maschile';
-  document.getElementById('tool-title').textContent = 'Graduatorie — Soc. '+p.societa;
+  const proBar = document.getElementById('proiezione-bar');
+  if (isProiezione){
+    proBar.style.display='';
+    document.getElementById('tool-title').textContent = `Proiezione Regionale — ${p.regione}`;
+  } else {
+    proBar.style.display='none';
+    document.getElementById('tool-title').textContent = 'Graduatorie — Soc. '+p.societa;
+  }
   document.getElementById('tool-sub').textContent =
     `CdS ${catLabel} · ${p.tipo_attivita==='P'?'Outdoor':'Indoor'} ${p.anno} · ${p.regione}`;
   document.getElementById('tag-cat').textContent = catLabel;
