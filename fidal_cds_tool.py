@@ -3039,27 +3039,39 @@ function _renderClassifica(data, title, content){
     eligible.slice(0,5).map(s=>({nome:s.nome,pts:s.total_pts})));
 
   document.getElementById('clas-screen-title').textContent=`Proiezione Regionale — ${p.regione}`;
-  document.getElementById('clas-screen-sub').textContent=`CdS ${p.categoria} · ${p.tipo_attivita==='P'?'Outdoor':'Indoor'} ${p.anno} · ${eligible.length} competitive · ${notElig} escluse`;
+  const _pending = eligible.filter(s=>!s.optimal||!s.optimal.score).length;
+  const _subParts = [`CdS ${p.categoria} · ${p.tipo_attivita==='P'?'Outdoor':'Indoor'} ${p.anno}`];
+  _subParts.push(`${eligible.filter(s=>s.optimal&&s.optimal.score>0).length} in classifica`);
+  if (_pending) _subParts.push(`${_pending} in attesa calcolo`);
+  if (notElig)  _subParts.push(`${notElig} non eleggibili`);
+  document.getElementById('clas-screen-sub').textContent=_subParts.join(' · ');
 
   if (!eligible.length){
     content.innerHTML='<div style="color:var(--muted);font-size:.82rem">Nessuna società con requisiti CdS soddisfatti.</div>';
     return;
   }
-  const _scoreOf = s => (s.optimal&&s.optimal.score>0) ? s.optimal.score : (s.total_pts||0);
-  const maxPts = _scoreOf(eligible[0]);
-  const rows = eligible.flatMap((s,i)=>{
-    const hasOpt = s.optimal && s.optimal.score > 0;
-    const displayScore = _scoreOf(s);
-    const barW = Math.round(displayScore/maxPts*100);
+  // Solo le società con optimal calcolato entrano in classifica
+  // (tot. disponibile non rispetta i vincoli CdS → non confrontabile)
+  const ranked = eligible.filter(s => s.optimal && s.optimal.score > 0);
+  const pendingOpt = eligible.length - ranked.length;
+
+  if (ranked.length === 0){
+    const msg = pendingOpt > 0
+      ? `Nessuna società ha ancora il punteggio CdS ottimale calcolato (${pendingOpt} competitive trovate). Rigenera il DB regionale per calcolare le schede ottimali.`
+      : 'Nessuna società competitiva trovata.';
+    content.innerHTML = `<div style="color:var(--muted);font-size:.85rem;padding:.5rem 0">${msg}</div>`;
+    return;
+  }
+
+  const maxPts = ranked[0].optimal.score;
+  const rows = ranked.flatMap((s,i)=>{
+    const barW = Math.round(s.optimal.score/maxPts*100);
     const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}.`;
     const rid = `clas-row-${i}`;
 
     // Punteggio: "scheda ottimale" o "Σ totale disponibile"
-    const scoreCell = hasOpt
-      ? `<span style="font-weight:700">${s.optimal.score.toLocaleString('it')}</span>
-         <span title="Punteggio scheda CdS ottimale: selezione automatica dei 13 migliori risultati rispettando i vincoli (min 10 gare, min 2 lanci, min 2 salti, max 2 atlete per gara)" style="font-size:.66rem;color:var(--green);margin-left:.3rem;cursor:help">CdS ottimale</span>`
-      : `${(s.total_pts||0).toLocaleString('it')}
-         <span title="Somma di tutti i punti disponibili per questa società — non tiene conto dei vincoli CdS. Rigenera il DB regionale per calcolare il punteggio scheda esatto." style="font-size:.66rem;color:var(--muted);margin-left:.3rem;cursor:help">tot. disponibile</span>`;
+    const scoreCell = `<span style="font-weight:700">${s.optimal.score.toLocaleString('it')}</span>
+      <span title="Punteggio scheda CdS ottimale: selezione automatica dei 13 migliori risultati rispettando i vincoli (min 10 gare, min 2 lanci, min 2 salti, max 2 atlete per gara)" style="font-size:.66rem;color:var(--green);margin-left:.3rem;cursor:help">CdS ottimale</span>`;
 
     // Breakdown: Corsa (corse+ostacoli) · Salti · Lanci · Staffette
     const bk = [
@@ -3070,8 +3082,8 @@ function _renderClassifica(data, title, content){
     if (s.pts_staffette) bk.push(`🔄 ${s.pts_staffette.toLocaleString('it')} staff.`);
     const breakdown = bk.join(' · ');
 
-    // Bottone view data (solo se c'è optimal.sel)
-    const viewBtn = hasOpt
+    // Bottone view data (sempre presente poiché ranked ha solo società con optimal)
+    const viewBtn = s.optimal.sel && s.optimal.sel.length
       ? `<button class="clas-expand" onclick="toggleClasDetail('${rid}')">+</button>`
       : '';
 
@@ -3087,7 +3099,7 @@ function _renderClassifica(data, title, content){
 
     // Riga dettaglio (scheda ottimale espandibile)
     let detailRow = '';
-    if (hasOpt && s.optimal.sel && s.optimal.sel.length) {
+    if (s.optimal.sel && s.optimal.sel.length) {
       const detailRows = s.optimal.sel
         .sort((a,b)=>(b.pts||0)-(a.pts||0))
         .map(r=>{
