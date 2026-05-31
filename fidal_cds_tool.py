@@ -3057,9 +3057,9 @@ function _renderClassifica(data, title, content){
     // Punteggio: "scheda ottimale" o "Σ totale disponibile"
     const scoreCell = hasOpt
       ? `<span style="font-weight:700">${s.optimal.score.toLocaleString('it')}</span>
-         <span title="Punteggio scheda ottimale calcolata (13 risultati, vincoli CdS)" style="font-size:.66rem;color:var(--green);margin-left:.3rem;cursor:help">scheda</span>`
+         <span title="Punteggio scheda CdS ottimale: selezione automatica dei 13 migliori risultati rispettando i vincoli (min 10 gare, min 2 lanci, min 2 salti, max 2 atlete per gara)" style="font-size:.66rem;color:var(--green);margin-left:.3rem;cursor:help">CdS ottimale</span>`
       : `${(s.total_pts||0).toLocaleString('it')}
-         <span title="Somma di tutti i punti disponibili — calcola il build per il punteggio scheda esatto" style="font-size:.66rem;color:var(--muted);margin-left:.3rem;cursor:help">Σ totale</span>`;
+         <span title="Somma di tutti i punti disponibili per questa società — non tiene conto dei vincoli CdS. Rigenera il DB regionale per calcolare il punteggio scheda esatto." style="font-size:.66rem;color:var(--muted);margin-left:.3rem;cursor:help">tot. disponibile</span>`;
 
     // Breakdown: Corsa (corse+ostacoli) · Salti · Lanci · Staffette
     const bk = [
@@ -3118,7 +3118,7 @@ function _renderClassifica(data, title, content){
   content.innerHTML=`<table class="clas-table">
     <thead><tr>
       <th>#</th><th>Società</th>
-      <th title="'scheda' = ottimale calcolata; 'Σ totale' = somma tutti i punti disponibili">Punti</th>
+      <th title="'CdS ottimale' = scheda calcolata con vincoli (13 ris., min 10 gare, min 2 lanci+salti); 'tot. disponibile' = somma grezza, rigenera il DB per il valore esatto">Punti</th>
       <th style="font-size:.67rem">Corsa · Salti · Lanci · Staff</th>
       <th></th><th></th>
     </tr></thead>
