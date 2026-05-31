@@ -8,6 +8,7 @@ from flask import Flask, jsonify, request, Response, stream_with_context
 import requests
 from bs4 import BeautifulSoup
 import re, sys, threading, time, webbrowser, json, os
+from itertools import combinations
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -258,6 +259,178 @@ def _proiezione_cache_path(anno, tipo, sesso, cat, reg):
     fname = f'proiezione_{anno}_{tipo}_{sesso}_{cat}_{reg}.json'
     return os.path.join(_data_dir(), fname)
 
+def _normalize_events(data, categoria):
+    """Normalizza i nomi evento alla forma canonica della tabella punteggi.
+    Senza questo, società diverse riportano lo stesso evento con nomi differenti
+    (es. '80 piani' / '80 Piani' / '80m piani') → l'ottimizzatore vede N*2 eventi
+    invece di N e la complessità combinatoria esplode."""
+    tabella = _TABELLE.get(categoria, {})
+    if not tabella:
+        return
+    for row in data:
+        key = _match_gara(row['ev'], tabella)
+        if key:
+            row['ev'] = key
+
+def _soc_meta(results):
+    """Statistiche aggregate per una società: totale punti, breakdown per tipo, eleggibilità."""
+    _lanci_kw = {'peso','martello','giavellotto','disco','lancio','vortex','palla'}
+    _salti_kw = {'lungo','triplo','alto','asta','salto'}
+    evs = {r['ev'] for r in results}
+    total = pts_corsa = pts_lanci = pts_salti = pts_staff = 0
+    for r in results:
+        p = r.get('pts') or 0
+        total += p
+        t = r.get('type', 'corsa')
+        if t in ('corsa', 'ostacoli'): pts_corsa += p
+        elif t == 'lancio':            pts_lanci += p
+        elif t == 'salto':             pts_salti += p
+        elif t == 'staffetta':         pts_staff  += p
+    ev_low = [e.lower() for e in evs]
+    n_la = sum(1 for e in ev_low if any(k in e for k in _lanci_kw))
+    n_sa = sum(1 for e in ev_low if any(k in e for k in _salti_kw))
+    n_ev = len(evs)
+    return {
+        'num_gare':      n_ev,
+        'total_pts':     total,
+        'pts_corsa':     pts_corsa,
+        'pts_lanci':     pts_lanci,
+        'pts_salti':     pts_salti,
+        'pts_staffette': pts_staff,
+        'n_lanci':       n_la,
+        'n_salti':       n_sa,
+        'can_compete':   n_ev >= 10 and n_la >= 2 and n_sa >= 2,
+    }
+
+# ── OTTIMIZZATORE PYTHON (per build server-side) ─────────────────────────────
+
+_CAT_CONSTRAINTS = {
+    'CF': {'nSel':13,'minEv':10,'minLanci':2,'minSalti':2,'maxAthlInd':2,'maxD':3},
+    'CM': {'nSel':13,'minEv':10,'minLanci':2,'minSalti':2,'maxAthlInd':2,'maxD':3},
+    'RF': {'nSel':8, 'minEv':6, 'minLanci':1,'minSalti':1,'maxAthlInd':1,'maxD':2},
+    'RM': {'nSel':8, 'minEv':6, 'minLanci':1,'minSalti':1,'maxAthlInd':1,'maxD':2},
+}
+_OPT_LANCI = {'peso','martello','giavellotto','disco','lancio','vortex','palla'}
+_OPT_SALTI = {'lungo','triplo','alto','asta','salto'}
+
+def _opt_is_lancio(ev): return any(k in ev.lower() for k in _OPT_LANCI)
+def _opt_is_salto(ev):  return any(k in ev.lower() for k in _OPT_SALTI)
+
+def _athlete_key(name):
+    """Usa il cognome (prima parola) come chiave uniforme per il tracking atleti."""
+    return name.split()[0].upper() if name else ''
+
+def _staff_athlete_keys(raw_staff):
+    """Estrae i cognomi delle atlete da rawStaff ('LORINI A. CF,...')."""
+    keys = []
+    for part in re.split(r'[,/]', raw_staff or ''):
+        cleaned = re.sub(r'\s+[A-Z]{2}\s*$', '', part.strip()).strip()
+        k = _athlete_key(cleaned)
+        if k:
+            keys.append(k)
+    return keys
+
+def _opt_assign_best(by_ev, ev_sub, dbl_set, incl_staff, n_sel, max_athl_ind):
+    """Greedy assignment per un sottoinsieme di eventi."""
+    ev_cap = {ev: (2 if ev in dbl_set else 1) for ev in ev_sub}
+    staff_evs = {r['ev'] for r in incl_staff}
+    cands = []
+    for ev in ev_sub:
+        if ev not in staff_evs:
+            cands.extend(by_ev.get(ev, []))
+    cands.sort(key=lambda r: r.get('pts') or 0, reverse=True)
+
+    sel, ac_total, ac_ind, ev_used = [], {}, {}, {}
+    for st in incl_staff:
+        if st['ev'] in ev_sub:
+            sel.append(st)
+            ev_used[st['ev']] = ev_used.get(st['ev'], 0) + 1
+            # Prenota le atlete della staffetta (max 2 totali per atleta)
+            for k in _staff_athlete_keys(st.get('rawStaff', '')):
+                ac_total[k] = ac_total.get(k, 0) + 1
+
+    for r in cands:
+        ev = r['ev']
+        a  = r.get('athlete', '')
+        ak = _athlete_key(a)
+        if ev_used.get(ev, 0) >= ev_cap.get(ev, 1): continue
+        if ac_total.get(ak, 0) >= 2:                continue
+        if ac_ind.get(ak, 0) >= max_athl_ind:        continue
+        sel.append(r)
+        ac_total[ak] = ac_total.get(ak, 0) + 1
+        ac_ind[ak]   = ac_ind.get(ak, 0) + 1
+        ev_used[ev]  = ev_used.get(ev, 0) + 1
+
+    if len(sel) != n_sel: return None, -1
+    sel_evs = {r['ev'] for r in sel}
+    if not all(ev in sel_evs for ev in ev_sub): return None, -1
+    return sel, sum(r.get('pts') or 0 for r in sel)
+
+def _compute_optimal_py(results, cat):
+    """
+    Calcola la scheda ottimale per una società.
+    Restituisce {'score': int, 'sel': [lista risultati selezionati]} o None.
+    """
+    C = _CAT_CONSTRAINTS.get(cat, _CAT_CONSTRAINTS['CF'])
+    n_sel, min_ev = C['nSel'], C['minEv']
+    min_lanci, min_salti = C['minLanci'], C['minSalti']
+    max_athl_ind, max_d = C['maxAthlInd'], C['maxD']
+
+    ind = [r for r in results if not r.get('isStaffetta') and r.get('pts_ok')]
+    staff = [r for r in results if r.get('isStaffetta') and r.get('pts_ok')]
+    if not ind: return None
+
+    # Raggruppa individuale per evento, top-25 max
+    by_ev = {}
+    for r in ind:
+        by_ev.setdefault(r['ev'], []).append(r)
+    for ev in by_ev:
+        by_ev[ev].sort(key=lambda r: r.get('pts') or 0, reverse=True)
+        by_ev[ev] = by_ev[ev][:25]
+
+    ev_list = list(by_ev.keys())
+    dbl = [ev for ev in ev_list if len(by_ev[ev]) >= 2]
+
+    # Staffette valide per il programma CdS (solo 4x100)
+    best_staff_by_ev = {}
+    for r in staff:
+        if re.search(r'4\s*[xX]\s*100(?!0)', r['ev']):
+            prev = best_staff_by_ev.get(r['ev'])
+            if not prev or (r.get('pts') or 0) > (prev.get('pts') or 0):
+                best_staff_by_ev[r['ev']] = r
+    staff_list = list(best_staff_by_ev.values())
+
+    best_total, best_sel = -1, None
+
+    for mask in range(1 << min(len(staff_list), 3)):
+        incl = [staff_list[j] for j in range(len(staff_list)) if mask & (1 << j)]
+        staff_evs_m = {r['ev'] for r in incl}
+        ev_full = ev_list + [ev for ev in staff_evs_m if ev not in ev_list]
+        dbl_full = dbl  # staffette hanno 1 risultato, non sono in dbl
+
+        for n_ev in range(min_ev, min(n_sel, len(ev_full)) + 1):
+            n_d = n_sel - n_ev
+            if n_d > max_d: continue
+            for ev_sub in combinations(ev_full, n_ev):
+                if sum(_opt_is_lancio(e) for e in ev_sub) < min_lanci: continue
+                if sum(_opt_is_salto(e) for e in ev_sub) < min_salti:  continue
+                dc = [e for e in ev_sub if e in dbl_full]
+                if len(dc) < n_d: continue
+                for de in combinations(dc, n_d):
+                    sel, total = _opt_assign_best(by_ev, ev_sub, set(de), incl, n_sel, max_athl_ind)
+                    if sel and total > best_total:
+                        best_total, best_sel = total, sel
+
+    if best_sel is None: return None
+    return {
+        'score': best_total,
+        'ids': [r.get('id') for r in best_sel],
+        'sel': [{'id': r.get('id'), 'ev': r['ev'], 'athlete': r.get('athlete',''),
+                 'pts': r.get('pts', 0), 'perf': r.get('perf',''),
+                 'isStaffetta': r.get('isStaffetta', False)} for r in best_sel],
+        'updated_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+    }
+
 @app.route('/api/proiezione')
 def api_proiezione():
     anno  = request.args.get('anno',  '2026')
@@ -275,8 +448,15 @@ def api_proiezione():
         try:
             with open(cache_path, encoding='utf-8') as f:
                 cached = json.load(f)
+            _normalize_events(cached['data'], cat)   # fix retroattivo su cache esistenti
+            # Restituisce la meta senza il campo 'data' per non gonfiare il payload
+            meta_clean = {
+                cod: {k: v for k, v in m.items() if k != 'data'}
+                for cod, m in cached.get('societies_meta', {}).items()
+            }
             return jsonify({'ok': True, 'from_cache': True,
-                            'data': cached['data'], 'updated_at': cached['updated_at']})
+                            'data': cached['data'], 'updated_at': cached['updated_at'],
+                            'societies_meta': meta_clean})
         except Exception:
             pass  # cache corrotta → rifetch
 
@@ -403,6 +583,58 @@ def api_societa():
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)})
 
+def _match_manual_to_soc(manual_entries, soc_cod, soc_nome, soc_results):
+    """
+    Abbina i manual entries a una società.
+    Priorità: soc_cod esplicito → overlap cognomi atleti.
+    Restituisce i manual entries abbinati, taggati con soc_cod/soc_nome e un id sintetico.
+    """
+    if not manual_entries:
+        return []
+
+    # Cognomi degli atleti della società (dalla lookup FIDAL)
+    soc_last_names = set()
+    for r in soc_results:
+        athletes = [r.get('athlete', '')]
+        if r.get('staffAthl'):
+            athletes = r['staffAthl']
+        elif r.get('rawStaff'):
+            athletes = [p.strip() for p in re.split(r'[,/]', r['rawStaff']) if p.strip()]
+        for a in athletes:
+            last = a.split()[0].upper() if a else ''
+            if last:
+                soc_last_names.add(last)
+
+    matched, seen_ids = [], set()
+    for me in manual_entries:
+        mid = me.get('savedId', '')
+        if mid in seen_ids:
+            continue
+
+        # Match per soc_cod esplicito
+        me_cod = me.get('soc_cod', '')
+        if me_cod and me_cod != soc_cod:
+            continue
+
+        # Se non ha soc_cod, verifica overlap cognomi
+        if not me_cod:
+            me_athletes = me.get('staffAthl') or [me.get('athlete', '')]
+            me_lasts = {a.split()[0].upper() for a in me_athletes if a}
+            if not (me_lasts & soc_last_names):
+                continue
+
+        entry = dict(me)
+        entry['soc_cod']  = soc_cod
+        entry['soc_nome'] = soc_nome
+        entry.setdefault('pts_ok', True)
+        entry.setdefault('isStaffetta', False)
+        # Assegna id sintetico per non collidere con gli id FIDAL
+        if 'id' not in entry:
+            entry['id'] = f'manual_{mid}'
+        seen_ids.add(mid)
+        matched.append(entry)
+    return matched
+
 @app.route('/api/proiezione/build')
 def api_proiezione_build():
     anno  = request.args.get('anno',  '2026')
@@ -418,6 +650,25 @@ def api_proiezione_build():
 
     def generate():
         try:
+            # Carica manual entries per questa categoria
+            manual_entries = _read_manual().get(cat, [])
+
+            # Carica cache esistente per refresh incrementale
+            cache_path = _proiezione_cache_path(anno, tipo, sesso, cat, reg)
+            cached_meta  = {}   # soc_cod → {num_gare, total_pts, ...}
+            cached_by_soc = {}  # soc_cod → [results]
+            if os.path.exists(cache_path):
+                try:
+                    with open(cache_path, encoding='utf-8') as f:
+                        old_cache = json.load(f)
+                    cached_meta = old_cache.get('societies_meta', {})
+                    for r in old_cache.get('data', []):
+                        cod = r.get('soc_cod')
+                        if cod:
+                            cached_by_soc.setdefault(cod, []).append(r)
+                except Exception:
+                    pass
+
             yield _ev({'type': 'status', 'msg': 'Caricamento lista società…'})
             societies = _fetch_society_list(reg)
             if not societies:
@@ -425,7 +676,11 @@ def api_proiezione_build():
             total = len(societies)
             yield _ev({'type': 'total', 'n': total})
 
-            all_results, found_soc = [], 0
+            all_results, new_societies_meta = [], {}
+            found_soc, unchanged_soc = 0, 0
+            _lanci = {'peso','martello','giavellotto','disco','lancio','vortex','palla'}
+            _salti = {'lungo','triplo','alto','asta','salto'}
+
             for i, soc in enumerate(societies):
                 try:
                     p = {'anno': anno, 'tipo_attivita': tipo, 'sesso': sesso,
@@ -433,39 +688,91 @@ def api_proiezione_build():
                          'vento': vento, 'limite': '5', 'societa': soc['cod']}
                     results, _ = _do_fidal_fetch(p)
                     if results:
-                        all_results.extend(results)
-                        found_soc += 1
-                        n_athl = len({r['athlete'] for r in results
-                                      if not r.get('isStaffetta', False)})
-                        # Verifica se la società può formare una scheda valida
-                        _lanci = {'peso','martello','giavellotto','disco','lancio','vortex','palla'}
-                        _salti = {'lungo','triplo','alto','asta','salto'}
-                        ev_set = {r['ev'] for r in results if not r.get('isStaffetta', False)}
-                        n_ev = len(ev_set)
-                        n_la = sum(1 for ev in ev_set if any(k in ev.lower() for k in _lanci))
-                        n_sa = sum(1 for ev in ev_set if any(k in ev.lower() for k in _salti))
-                        can_compete = n_ev >= 10 and n_la >= 2 and n_sa >= 2
-                        yield _ev({'type': 'found', 'soc': soc['nome'],
-                                   'n': len(results), 'n_athl': n_athl,
-                                   'n_ev': n_ev, 'n_la': n_la, 'n_sa': n_sa,
-                                   'can_compete': can_compete,
-                                   'done': i+1, 'total': total, 'found': found_soc})
+                        new_meta = _soc_meta(results)
+                        old_meta = cached_meta.get(soc['cod'], {})
+
+                        # Forza aggiornamento se can_compete ma manca optimal/data,
+                        # o se il numero di manual entries è cambiato
+                        soc_manual_count = len(_match_manual_to_soc(
+                            manual_entries, soc['cod'], soc['nome'], results))
+                        needs_optimal = new_meta.get('can_compete') and (
+                            not old_meta.get('optimal') or not old_meta.get('data') or
+                            old_meta.get('manual_count', 0) != soc_manual_count
+                        )
+                        if (not needs_optimal and old_meta and
+                                old_meta.get('num_gare') == new_meta['num_gare'] and
+                                old_meta.get('total_pts') == new_meta['total_pts'] and
+                                soc['cod'] in cached_by_soc):
+                            # Nessuna variazione: riutilizza dati in cache
+                            all_results.extend(cached_by_soc[soc['cod']])
+                            new_societies_meta[soc['cod']] = old_meta
+                            unchanged_soc += 1
+                            yield _ev({'type': 'unchanged', 'soc': soc['nome'],
+                                       'num_gare': new_meta['num_gare'],
+                                       'total_pts': new_meta['total_pts'],
+                                       'done': i+1, 'total': total,
+                                       'found': found_soc, 'unchanged': unchanged_soc})
+                        else:
+                            # Dati nuovi o variati: aggiorna
+                            for r in results:
+                                r['soc_cod']  = soc['cod']
+                                r['soc_nome'] = soc['nome']
+                            all_results.extend(results)
+
+                            # Abbina manual entries a questa società
+                            soc_manual = _match_manual_to_soc(
+                                manual_entries, soc['cod'], soc['nome'], results)
+                            results_full = results + soc_manual  # dati FIDAL + manuali
+
+                            meta_entry = {
+                                **new_meta, 'nome': soc['nome'],
+                                'updated_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                            }
+                            if new_meta.get('can_compete'):
+                                meta_entry['data'] = results_full
+                                meta_entry['manual_count'] = len(soc_manual)
+                                # Calcola scheda ottimale con dati FIDAL + manuali
+                                opt = _compute_optimal_py(results_full, cat)
+                                if opt:
+                                    meta_entry['optimal'] = opt
+                            new_societies_meta[soc['cod']] = meta_entry
+                            found_soc += 1
+                            n_athl = len({r['athlete'] for r in results
+                                          if not r.get('isStaffetta', False)})
+                            ev_set = {r['ev'] for r in results if not r.get('isStaffetta', False)}
+                            n_ev = len(ev_set)
+                            n_la = sum(1 for ev in ev_set if any(k in ev.lower() for k in _lanci))
+                            n_sa = sum(1 for ev in ev_set if any(k in ev.lower() for k in _salti))
+                            can_compete = n_ev >= 10 and n_la >= 2 and n_sa >= 2
+                            opt_score = meta_entry.get('optimal', {}).get('score', -1)
+                            yield _ev({'type': 'found', 'soc': soc['nome'],
+                                       'n': len(results), 'n_athl': n_athl,
+                                       'n_ev': n_ev, 'n_la': n_la, 'n_sa': n_sa,
+                                       'can_compete': can_compete,
+                                       'num_gare': new_meta['num_gare'],
+                                       'total_pts': new_meta['total_pts'],
+                                       'optimal_score': opt_score,
+                                       'done': i+1, 'total': total,
+                                       'found': found_soc, 'unchanged': unchanged_soc})
                     else:
                         yield _ev({'type': 'skip', 'soc': soc['nome'],
-                                   'done': i+1, 'total': total, 'found': found_soc})
+                                   'done': i+1, 'total': total,
+                                   'found': found_soc, 'unchanged': unchanged_soc})
                 except Exception:
                     yield _ev({'type': 'skip', 'soc': soc['nome'],
-                               'done': i+1, 'total': total, 'found': found_soc})
+                               'done': i+1, 'total': total,
+                               'found': found_soc, 'unchanged': unchanged_soc})
                 time.sleep(0.2)   # delay per non sovraccaricare FIDAL
 
             if all_results:
-                cache_path = _proiezione_cache_path(anno, tipo, sesso, cat, reg)
                 updated_at = time.strftime('%Y-%m-%dT%H:%M:%S')
                 with open(cache_path, 'w', encoding='utf-8') as f:
-                    json.dump({'data': all_results, 'updated_at': updated_at},
+                    json.dump({'data': all_results, 'updated_at': updated_at,
+                               'societies_meta': new_societies_meta},
                               f, ensure_ascii=False, indent=2)
                 yield _ev({'type': 'done', 'n_results': len(all_results),
-                           'found_societies': found_soc, 'updated_at': updated_at})
+                           'found_societies': found_soc, 'unchanged_societies': unchanged_soc,
+                           'updated_at': updated_at})
             else:
                 yield _ev({'type': 'error',
                            'msg': f'Nessun risultato {cat} trovato nella regione {reg}'})
@@ -569,6 +876,27 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   border-radius:5px;cursor:pointer;transition:all .15s;white-space:nowrap}
 .btn-refresh-cache:hover{background:var(--blue);color:#fff}
 .btn-refresh-cache:disabled{opacity:.5;cursor:not-allowed}
+.clas-panel{background:var(--card);border-bottom:2px solid var(--border);padding:1rem 2rem 1.25rem}
+.clas-panel h3{font-family:var(--head);font-size:1rem;font-weight:800;color:var(--blue);margin-bottom:.75rem}
+.clas-table{width:100%;border-collapse:collapse;font-size:.8rem}
+.clas-table th{font-family:var(--head);font-size:.67rem;font-weight:700;text-transform:uppercase;
+  letter-spacing:.06em;color:var(--muted);padding:.35rem .6rem;border-bottom:2px solid var(--border);text-align:left}
+.clas-table td{padding:.28rem .6rem;border-bottom:1px solid var(--border);vertical-align:middle}
+.clas-table tr:nth-child(odd) td{background:#f7faff}
+.clas-rank{font-family:var(--mono);font-weight:700;color:var(--muted);width:36px;white-space:nowrap}
+.clas-score{font-family:var(--mono);font-weight:700;color:var(--blue);white-space:nowrap}
+.clas-bar-cell{width:200px}
+.clas-bar{height:7px;background:var(--blue2);border-radius:4px;min-width:2px;transition:width .3s}
+.clas-detail{display:none;background:#f7faff;border-bottom:2px solid var(--border)}
+.clas-detail.open{display:table-row}
+.clas-detail td{padding:.5rem 1rem .75rem 2.5rem}
+.clas-detail-table{width:100%;border-collapse:collapse;font-size:.76rem}
+.clas-detail-table td{padding:.18rem .5rem;border-bottom:1px solid var(--border)}
+.clas-detail-table tr:last-child td{border:none}
+.clas-expand{background:none;border:1px solid var(--border);border-radius:4px;
+  cursor:pointer;font-size:.75rem;padding:.1rem .4rem;color:var(--muted);
+  line-height:1;transition:all .15s}
+.clas-expand:hover{border-color:var(--blue);color:var(--blue)}
 @keyframes bspin{to{transform:rotate(360deg)}}
 .bspin{display:inline-block;animation:bspin .8s linear infinite}
 .url-preview{margin-top:.75rem;font-family:var(--mono);font-size:.68rem;
@@ -826,6 +1154,9 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
     <div class="loading-bar-fill indeterminate" id="loading-bar-fill"></div>
   </div>
   <p id="loading-sub" style="font-size:.72rem;color:rgba(255,255,255,.55);font-weight:400;margin-top:-.5rem"></p>
+  <div id="opt-log" style="display:none;font-size:.65rem;color:rgba(255,255,255,.4);
+    max-height:72px;overflow-y:auto;text-align:left;width:300px;line-height:1.7;
+    border-top:1px solid rgba(255,255,255,.12);padding-top:.4rem;margin-top:-.2rem"></div>
 </div>
 
 <!-- ══════════════ SCREEN 1: FORM ══════════════ -->
@@ -966,6 +1297,25 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   </div>
 </div>
 
+<!-- ══════════════ SCREEN 1b: CLASSIFICA REGIONALE ══════════════ -->
+<div class="screen" id="scr-classifica">
+  <div class="hbar">
+    <div class="hbadge">AC</div>
+    <div>
+      <div class="htitle" id="clas-screen-title">Proiezione Regionale</div>
+      <div class="hsub" id="clas-screen-sub">—</div>
+    </div>
+    <div class="hmeta">
+      <span class="tag" id="clas-screen-ts"></span>
+    </div>
+    <button class="btn-refresh-cache" onclick="fetchProiezione(true)" style="margin-right:.5rem">🔄 Aggiorna dati</button>
+    <button class="btn-back" onclick="goBack()">← Nuova ricerca</button>
+  </div>
+  <div style="padding:1.5rem 2rem">
+    <div id="clas-screen-content"><div style="color:var(--muted);font-size:.85rem">Caricamento…</div></div>
+  </div>
+</div>
+
 <!-- ══════════════ SCREEN 2: TOOL ══════════════ -->
 <div class="screen" id="scr-tool">
   <!-- Header -->
@@ -988,6 +1338,13 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
     <span id="proiezione-ts" style="font-size:.75rem;opacity:.8"></span>
     <span style="margin-left:auto"></span>
     <button class="btn-refresh-cache" onclick="fetchProiezione(true)">🔄 Aggiorna dati</button>
+    <button class="btn-refresh-cache" onclick="computeClassifica()">🏆 Classifica</button>
+  </div>
+
+  <!-- Classifica regionale -->
+  <div class="clas-panel" id="clas-panel" style="display:none">
+    <h3 id="clas-title">🏆 Classifica Regionale</h3>
+    <div id="clas-content"></div>
   </div>
 
   <!-- Constraints -->
@@ -1208,32 +1565,34 @@ const SALTO_EVS  = new Set(['lungo','triplo','alto','asta','salto']);
 const TYPE_LBL   = {corsa:'Corsa',ostacoli:'Ostacoli',salto:'Salto',lancio:'Lancio',staffetta:'Staffetta'};
 
 // ── PROGRAMMI TECNICI CdS (per preset filtro gare) ──────
+// Helper: vero se l'evento è un ostacolo (FIDAL usa sia "ostacoli" che "hs"/"Hs")
+const _isOstac = e => e.includes('ostac') || e.includes(' hs') || e.includes('hs ') || e.startsWith('hs');
+
 const CDS_PROGRAMS = {
   // Ragazzi: 60hs, 60, 1000, Marcia 2km, Alto, Lungo, Peso gomma 2kg, Vortex, Staffetta 4x100
   RM: ev => {
     const e = ev.toLowerCase();
-    return e.includes('60 ostac') || e.includes('60 piani') ||
+    return (e.includes('60') && (e.includes('piani') || _isOstac(e))) ||
            (e.includes('1000') && !e.includes('3x') && !e.includes('3 x')) ||
            e.includes('marcia') || e.includes('in alto') || e.includes('in lungo') ||
            (e.includes('peso') && e.includes('2')) ||
            e.includes('vortex') ||
-           (e.includes('staffetta') && e.includes('100'));
+           (e.includes('staffetta') && /4\s*[xX]\s*100(?!0)/.test(e));
   },
   // Cadetti: 100hs, 300hs, 80, 300, 1000, 2000, 1200 siepi, Asta, Alto, Lungo, Triplo,
   //          Peso 4kg, Martello 4kg, Disco 1,5kg, Giavellotto 600g, Staffetta 4x100, Marcia 5km
   CM: ev => {
     const e = ev.toLowerCase();
     return (e.includes('80') && e.includes('piani')) ||
-           (e.includes('100') && e.includes('ostac')) ||
-           (e.includes('300') && e.includes('ostac')) ||
-           (e.includes('300') && e.includes('piani')) ||
+           (e.includes('100') && _isOstac(e)) ||
+           (e.includes('300') && (_isOstac(e) || e.includes('piani'))) ||
            (e.includes('1000') && !e.includes('3x') && !e.includes('3 x')) ||
            e.includes('2000') || e.includes('1200') ||
            e.includes('asta') || e.includes('in alto') || e.includes('in lungo') ||
            e.includes('triplo') ||
            (e.includes('peso') && e.includes('4')) ||
            e.includes('martello') || e.includes('disco') || e.includes('giavellott') ||
-           (e.includes('staffetta') && e.includes('100')) ||
+           (e.includes('staffetta') && /4\s*[xX]\s*100(?!0)/.test(e)) ||
            e.includes('marcia');
   },
 };
@@ -1242,15 +1601,15 @@ CDS_PROGRAMS.RF = CDS_PROGRAMS.RM; // stesso programma tecnico dei Ragazzi
 //          Peso 3kg, Martello 3kg, Disco 1kg, Giavellotto 400g, Staffetta 4x100, Marcia 3km
 CDS_PROGRAMS.CF = ev => {
   const e = ev.toLowerCase();
-  return (e.includes('80') && (e.includes('piani') || e.includes('ostac') || e.includes('hs'))) ||
-         (e.includes('300') && (e.includes('ostac') || e.includes('piani'))) ||
+  return (e.includes('80') && (e.includes('piani') || _isOstac(e))) ||
+         (e.includes('300') && (_isOstac(e) || e.includes('piani'))) ||
          (e.includes('1000') && !e.includes('3x') && !e.includes('3 x')) ||
          e.includes('2000') || e.includes('1200') ||
          e.includes('asta') || e.includes('in alto') || e.includes('in lungo') ||
          e.includes('triplo') ||
          e.includes('peso') || e.includes('martello') || e.includes('disco') ||
          e.includes('giavellott') ||
-         (e.includes('staffetta') && e.includes('100')) ||
+         (e.includes('staffetta') && /4\s*[xX]\s*100(?!0)/.test(e)) ||
          e.includes('marcia');
 };
 
@@ -1266,6 +1625,7 @@ function getC(){ return CONSTRAINTS[currentCategoria] || CONSTRAINTS.default; }
 
 // ── STATO ───────────────────────────────────────────────
 let ALL = [], selectedIds = new Set(), userPts = {}, staffAnalysis = [], excludedEvs = new Set(), topCombinations = [];
+let _societiesMeta = {}; // pre-calcolato dal build, caricato con la proiezione
 let currentCategoria = '', currentAnno = 2026, savedManualEntries = [];
 let unavailableAthletes = new Set(), minDateFilter = null;
 let societaList = [];
@@ -1309,7 +1669,7 @@ function activeAll(){
 // ── CATEGORIA PICKLIST ──────────────────────────────────
 // Limitato alle categorie con tabelle punteggi FIDAL disponibili
 const CATS={
-  F:[{v:'RF',l:'Ragazze (RF)'},{v:'CF',l:'Cadette (CF)'}],
+  F:[{v:'CF',l:'Cadette (CF)'},{v:'RF',l:'Ragazze (RF)'}],
   M:[{v:'RM',l:'Ragazzi (RM)'},{v:'CM',l:'Cadetti (CM)'}],
 };
 function updateCatOptions(){
@@ -1461,17 +1821,22 @@ function startBuildProiezione(){
       status.textContent = `0/${msg.n} società analizzate · 0 con ${p.categoria}`;
       _buildCompete = 0;
     }
-    else if (msg.type === 'found' || msg.type === 'skip'){
+    else if (msg.type === 'found' || msg.type === 'skip' || msg.type === 'unchanged'){
       const pct = Math.round(msg.done / msg.total * 100);
       fill.style.width = pct + '%';
       if (msg.type === 'found' && msg.can_compete) _buildCompete++;
-      status.textContent = `${msg.done}/${msg.total} analizzate · ${msg.found} con ${p.categoria} · 🏆 ${_buildCompete} competitive`;
+      const unch = msg.unchanged || 0;
+      status.textContent = `${msg.done}/${msg.total} analizzate · ${msg.found} aggiornate · ${unch} invariate · 🏆 ${_buildCompete} competitive`;
       if (msg.type === 'found'){
         const badge = msg.can_compete ? '🏆' : '⚠';
         const hint  = msg.can_compete
           ? `${msg.n_ev} gare · ${msg.n_la} lanci · ${msg.n_sa} salti`
           : `solo ${msg.n_ev} gare (min 10), ${msg.n_la} lanci, ${msg.n_sa} salti`;
-        log.innerHTML += `<div>${badge} ${msg.soc} — ${msg.n_athl} atlet${p.sesso==='F'?'e':'i'} · ${hint}</div>`;
+        const optStr = (msg.can_compete && msg.optimal_score > 0) ? ` · ottimale Σ ${msg.optimal_score}` : '';
+        log.innerHTML += `<div>${badge} ${msg.soc} — ${msg.n_athl} atlet${p.sesso==='F'?'e':'i'} · ${hint} · Σ ${msg.total_pts}pt${optStr}</div>`;
+        log.scrollTop = log.scrollHeight;
+      } else if (msg.type === 'unchanged'){
+        log.innerHTML += `<div style="color:var(--muted)">= ${msg.soc} — invariata (${msg.num_gare} gare · Σ ${msg.total_pts}pt)</div>`;
         log.scrollTop = log.scrollHeight;
       }
     }
@@ -1480,7 +1845,8 @@ function startBuildProiezione(){
       fill.style.width = '100%';
       const d = new Date(msg.updated_at);
       const fmt = d.toLocaleString('it-IT',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
-      status.textContent = `✅ Completato — ${msg.found_societies} società (🏆 ${_buildCompete} competitive) · ${msg.n_results} prestazioni · ${fmt}`;
+      const unch = msg.unchanged_societies || 0;
+      status.textContent = `✅ Completato — ${msg.found_societies} aggiornate · ${unch} invariate (🏆 ${_buildCompete} competitive) · ${msg.n_results} prestazioni · ${fmt}`;
       log.innerHTML += `<div style="font-weight:600;color:var(--green)">Dati salvati in cache. Avvio proiezione...</div>`;
       log.scrollTop = log.scrollHeight;
       setTimeout(() => {
@@ -1517,11 +1883,12 @@ function _proiezioneParams(p, force){
 
 function _applyProiezioneData(json, p){
   ALL = json.data;
+  _societiesMeta = json.societies_meta || {};
   selectedIds.clear(); userPts = {}; staffAnalysis = []; excludedEvs = new Set();
   unavailableAthletes = new Set(); minDateFilter = null; isProiezione = true;
   computeBests();
   ALL.filter(r=>r.isStaffetta).forEach(r=>{ r.staffAthl = resolveStaffettaAthletes(r.rawStaff); });
-  _pruneForProiezione(2);
+  _pruneForProiezione(10); // top-10 per evento: include atleti fino al 10° posto regionale
 }
 
 function _setProiezioneBannerTs(json){
@@ -1533,72 +1900,64 @@ function _setProiezioneBannerTs(json){
 }
 
 async function fetchProiezione(forceRefresh=false){
-  // Se siamo già sul tool screen, usa il refresh in background (no overlay bloccante)
-  const onTool = document.getElementById('scr-tool').classList.contains('active');
-  if (forceRefresh && onTool){ _bgRefreshProiezione(); return; }
+  // Refresh da scr-classifica già attiva
+  if (forceRefresh && document.getElementById('scr-classifica').classList.contains('active')){
+    _bgRefreshProiezione(); return;
+  }
 
   const errEl = document.getElementById('form-error');
   errEl.style.display='none';
   const p = getFormParams();
-  let fetchOk = false;
 
-  // ── Fase 1: fetch (overlay gestito qui, con finally garantito) ──────────────
-  _setLoadingMsg('Connessione a FIDAL…');
+  _setLoadingMsg('Caricamento proiezione regionale…');
   document.getElementById('loading').classList.remove('hidden');
   try {
     const resp = await fetch('/api/proiezione?' + _proiezioneParams(p, forceRefresh));
     const json = await resp.json();
     if (!json.ok) throw new Error(json.error);
 
-    _setLoadingMsg(json.from_cache ? 'Lettura cache…' : 'Elaborazione risultati…');
+    _setLoadingMsg('Elaborazione classifica…');
     _applyProiezioneData(json, p);
-    setupToolScreen(p);
-    _setProiezioneBannerTs(json);
-    show('scr-tool');
-    applyPresetCds();
-    fetchOk = true;
+
+    // Intestazione schermata classifica
+    const catLbl = `CdS ${p.categoria} · ${p.tipo_attivita==='P'?'Outdoor':'Indoor'} ${p.anno} · ${p.regione}`;
+    document.getElementById('clas-screen-title').textContent = `Proiezione Regionale — ${p.regione}`;
+    document.getElementById('clas-screen-sub').textContent = catLbl;
+    if (json.updated_at){
+      const d=new Date(json.updated_at);
+      const fmt=d.toLocaleString('it-IT',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
+      document.getElementById('clas-screen-ts').textContent = json.from_cache ? `📦 ${fmt}` : `🌐 ${fmt}`;
+    }
+
+    show('scr-classifica');
+    await computeClassifica();
   } catch(e){
     errEl.style.display='block'; errEl.textContent='Errore: ' + e.message;
   } finally {
-    // L'overlay della fetch viene sempre chiuso qui
     document.getElementById('loading').classList.add('hidden');
     _setLoadingMsg('Caricamento dati FIDAL…');
   }
-
-  // ── Fase 2: ottimizzatore (gestisce il proprio overlay autonomamente) ────────
-  if (fetchOk) computeOptimal();
 }
 
 async function _bgRefreshProiezione(){
-  const btn = document.getElementById('btn-refresh-cache');
-  const ts  = document.getElementById('proiezione-ts');
+  const ts  = document.getElementById('clas-screen-ts');
   const p   = getFormParams();
-  let fetchOk = false;
+  if (ts) ts.textContent = '<span class="bspin">⟳</span> Aggiornamento…';
 
-  btn.disabled = true;
-  btn.innerHTML = '<span class="bspin">⟳</span> Scaricamento…';
-  ts.textContent = '';
-
-  // ── Fase 1: fetch in background, nessun overlay bloccante ──────────────────
   try {
     const resp = await fetch('/api/proiezione?' + _proiezioneParams(p, true));
     const json = await resp.json();
     if (!json.ok) throw new Error(json.error);
-
     _applyProiezioneData(json, p);
-    _setProiezioneBannerTs(json);
-    applyPresetCds();
-    fetchOk = true;
-    btn.innerHTML = '<span class="bspin">⟳</span> Calcolo…';
+    if (json.updated_at){
+      const d=new Date(json.updated_at);
+      const fmt=d.toLocaleString('it-IT',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
+      if (ts) ts.textContent = `🌐 ${fmt}`;
+    }
+    await computeClassifica();
   } catch(e){
-    ts.textContent = `⚠ ${e.message}`;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '🔄 Aggiorna dati';
+    if (ts) ts.textContent = `⚠ ${e.message}`;
   }
-
-  // ── Fase 2: ottimizzatore (gestisce il proprio overlay autonomamente) ────────
-  if (fetchOk) computeOptimal();
 }
 
 function setupToolScreen(p){
@@ -2047,12 +2406,15 @@ function submitManual(){
   ALL.push(r);
 
   // Persisti sul server
+  const _mp = getFormParams();
   const savePayload={
     categoria:currentCategoria, ev:r.ev, type:r.type, athlete:r.athlete,
     perf:r.perf, wind:r.wind, piazz:r.piazz, citta:r.citta, data:r.data,
     anno:r.anno, pts:r.pts, pts_ok:r.pts_ok,
     isStaffetta:r.isStaffetta, rawStaff:r.rawStaff, staffAthl:r.staffAthl,
     isManual:true,
+    soc_cod: _mp.societa || '',
+    soc_nome: document.getElementById('f-societa-name')?.value?.trim() || '',
   };
   fetch('/api/manual',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(savePayload)})
@@ -2294,17 +2656,17 @@ function _afterGlobalFilter(){
 
 function _pruneForProiezione(nPerEv){
   // Per le staffette: tieni solo il top 1 per disciplina (migliore della regione).
-  // Senza questo limite, 30 società × 1 staffetta = 2^30 combinazioni → browser congelato.
   // Per le gare individuali: tieni i top nPerEv (per gestire conflitti atleti).
+  // NOTA: usa riferimento oggetto (non r.id) — in proiezione gli id si ripetono tra società.
   const byEv = {};
   ALL.forEach(r => { (byEv[r.ev] = byEv[r.ev]||[]).push(r); });
-  const keep = new Set();
+  const keep = new Set(); // Set di oggetti, non di id
   for (const ers of Object.values(byEv)){
     ers.sort((a,b)=>(pts(b)||0)-(pts(a)||0));
     const n = ers[0]?.isStaffetta ? 1 : nPerEv;
-    ers.slice(0, n).forEach(r=>keep.add(r.id));
+    ers.slice(0, n).forEach(r=>keep.add(r));
   }
-  ALL = ALL.filter(r=>keep.has(r.id));
+  ALL = ALL.filter(r=>keep.has(r));
 }
 function* combIter(arr, k){
   const n=arr.length;
@@ -2336,6 +2698,9 @@ function isValidSelCaps(sel, evCap, maxAthlInd=2){
   return true;
 }
 
+// Cache pre-calcolata da searchOptimal: ev → [risultati ordinati, top-N]
+let _evCands = null;
+
 function assignBest(evSub, dblSet, inclStaff){
   const C=getC();
   const evCap={};
@@ -2344,7 +2709,10 @@ function assignBest(evSub, dblSet, inclStaff){
   const cands=[];
   for (const ev of evSub){
     if (staffEvs.has(ev)) continue;
-    activeAll().filter(r=>r.ev===ev&&!r.isStaffetta).forEach(r=>cands.push(r));
+    // Usa la cache pre-calcolata se disponibile, altrimenti fallback
+    const src = (_evCands && _evCands[ev]) ||
+                activeAll().filter(r=>r.ev===ev&&!r.isStaffetta);
+    src.forEach(r=>cands.push(r));
   }
   // Tiebreaker stabile: stesso punteggio → ordine deterministico per atleta+prestazione
   cands.sort((a,b)=>pts(b)-pts(a)||a.athlete.localeCompare(b.athlete,'it')||a.perf.localeCompare(b.perf,'it'));
@@ -2389,12 +2757,32 @@ function assignBest(evSub, dblSet, inclStaff){
 
 function searchOptimal(inclStaff, maxDoubles){
   const C=getC();
-  // In proiezione limita le doppiature per ridurre la complessità combinatoria
   const maxD = maxDoubles !== undefined ? maxDoubles : C.nSel-C.minEv;
+
+  // Pre-calcola candidati per evento una sola volta (evita N×activeAll() in assignBest)
+  // In proiezione con molte società, limita a top-25 per evento: sufficiente per l'ottimale
+  const _ownCache = (_evCands === null);
+  if (_ownCache){
+    const active = activeAll();
+    const TOP = isProiezione ? 25 : Infinity;
+    _evCands = {};
+    for (const r of active){
+      if (r.isStaffetta) continue;
+      (_evCands[r.ev] = _evCands[r.ev] || []).push(r);
+    }
+    for (const ev of Object.keys(_evCands)){
+      _evCands[ev].sort((a,b)=>pts(b)-pts(a)||a.athlete.localeCompare(b.athlete,'it'));
+      if (TOP !== Infinity && _evCands[ev].length > TOP) _evCands[ev].length = TOP;
+    }
+  }
+
   const staffEvs=new Set(inclStaff.map(r=>r.ev));
-  const evList=[...new Set(activeAll().filter(r=>!r.isStaffetta||staffEvs.has(r.ev)).map(r=>r.ev))];
-  const dbl=evList.filter(ev=>activeAll().filter(r=>r.ev===ev).length>=2);
+  const active = activeAll();
+  const evList=[...new Set(active.filter(r=>!r.isStaffetta||staffEvs.has(r.ev)).map(r=>r.ev))];
+  const dbl=evList.filter(ev=>((_evCands&&_evCands[ev])||active.filter(r=>r.ev===ev)).length>=2);
   let best=-1,bestSel=null;
+  let _assignBestCalls=0;
+  const _t0=Date.now();
   for (let nEv=C.minEv;nEv<=Math.min(C.nSel,evList.length);nEv++){
     const nD=C.nSel-nEv;
     if (nD > maxD) continue; // salta se richiede troppe doppiature
@@ -2405,6 +2793,7 @@ function searchOptimal(inclStaff, maxDoubles){
       const dc=evSub.filter(ev=>dbl.includes(ev));
       if (dc.length<nD) continue;
       for (const de of combIter(dc,nD)){
+        _assignBestCalls++;
         const {sel,total}=assignBest(evSub,new Set(de),inclStaff);
         if (sel.length!==C.nSel) continue;
         // Tutti gli eventi di evSub devono avere almeno 1 risultato
@@ -2413,6 +2802,10 @@ function searchOptimal(inclStaff, maxDoubles){
         if (total>best){best=total;bestSel=sel;}
       }
     }
+  }
+  if (_ownCache){
+    _evCands = null;
+    console.log(`[searchOptimal] staff=[${inclStaff.map(r=>r.ev).join(',')||'—'}] eventi=${evList.length} assignBest=${_assignBestCalls} tempo=${Date.now()-_t0}ms best=${best}`);
   }
   return {total:best,sel:bestSel};
 }
@@ -2456,78 +2849,291 @@ function setNoteEst(msg, isError=false){
   }
 }
 
-function computeOptimal(){
+async function computeOptimal(){
   const missing=activeAll().filter(r=>userPts[r.id]===undefined&&!r.pts_ok);
   if (missing.length>0){
     setNoteEst(`⚠ ${missing.length} risultat${missing.length===1?'o':'i'} senza punteggio — inserisci i punti FIDAL per tutti prima di calcolare.`, true);
     return;
   }
   setNoteEst('');
-  // Mostra overlay con barra di avanzamento indeterminata
-  _setLoadingMsg('Calcolo punteggio ottimale…');
-  const _lbar = document.getElementById('loading-bar-track');
-  const _lsub = document.getElementById('loading-sub');
-  if (_lbar) _lbar.style.display = '';
-  document.getElementById('loading').classList.remove('hidden');
-  setTimeout(()=>{
-    try {
-      const allStaff=activeAll().filter(r=>r.isStaffetta);
-      const n=allStaff.length;
-      // Calcola stima combinazioni per il messaggio informativo
-      const evList=[...new Set(activeAll().filter(r=>!r.isStaffetta).map(r=>r.ev))];
-      const C=getC();
-      const maxD = isProiezione ? 1 : C.nSel-C.minEv;
-      const nEvs=evList.length;
-      let estCombs=0;
-      for(let nEv=C.minEv;nEv<=Math.min(C.nSel,nEvs);nEv++){
-        const nD=C.nSel-nEv; if(nD>maxD) continue;
-        // stima grossolana C(nEvs,nEv)
-        let c=1; for(let i=0;i<Math.min(nEv,nEvs-nEv);i++) c=c*(nEvs-i)/(i+1);
-        estCombs+=Math.round(c);
-      }
-      if(_lsub) _lsub.textContent=`~${estCombs.toLocaleString('it')} combinazioni · ${nEvs} gare · ${(1<<n)} conf. staffette`;
-      let bestTotal=-1,bestSel=null;
-      staffAnalysis=[];
-      topCombinations=[];
 
-      // Tutti i sottoinsiemi di staffette (2^n)
-      // In proiezione max 1 doppiatura: riduce C(17,10)×C(17,3)≈13M → C(17,12)×17≈105K iterazioni
-      for (let mask=0;mask<(1<<n);mask++){
-        const incl=allStaff.filter((_,i)=>mask&(1<<i));
-        const {total,sel}=searchOptimal(incl, maxD);
-        if (sel&&sel.length===C.nSel){
-          const inclLabel=incl.length?incl.map(r=>r.ev).join(' + '):'nessuna staffetta';
-          topCombinations.push({total,sel:[...sel],inclStaff:inclLabel});
-          if (total>bestTotal){bestTotal=total;bestSel=sel;}
+  const _lbar  = document.getElementById('loading-bar-track');
+  const _lfill = document.getElementById('loading-bar-fill');
+  const _lsub  = document.getElementById('loading-sub');
+  const _llog  = document.getElementById('opt-log');
+
+  // Mostra overlay con barra determinata
+  _setLoadingMsg('Calcolo punteggio ottimale…');
+  if (_lbar)  _lbar.style.display = '';
+  if (_lfill) { _lfill.classList.remove('indeterminate'); _lfill.style.width = '0%'; }
+  if (_llog)  { _llog.style.display = ''; _llog.innerHTML = ''; }
+  document.getElementById('loading').classList.remove('hidden');
+  await new Promise(r => setTimeout(r, 30)); // lascia al browser il tempo di renderizzare
+
+  const _startTs = Date.now();
+  function _elapsed(){ return ((Date.now()-_startTs)/1000).toFixed(1)+'s'; }
+
+  function setProgress(pct, stepMsg){
+    if (_lfill) _lfill.style.width = Math.min(100, Math.round(pct)) + '%';
+    _setLoadingMsg(`Calcolo punteggio ottimale… ${Math.round(pct)}%  ⏱ ${_elapsed()}`);
+    if (_lsub) _lsub.textContent = stepMsg;
+    if (_llog && stepMsg) {
+      _llog.innerHTML += `<div>[${_elapsed()}] ${stepMsg}</div>`;
+      _llog.scrollTop = _llog.scrollHeight;
+    }
+  }
+
+  let _savedALL = null; // riservato per usi futuri
+
+  try {
+    // Tieni solo il risultato migliore per tipo staffetta (max 1 per ev)
+    // Esclude staffette fuori dal programma CdS della categoria corrente
+    const _cdsProg=CDS_PROGRAMS[currentCategoria];
+    const _rawStaff=activeAll().filter(r=>r.isStaffetta&&(!_cdsProg||_cdsProg(r.ev)));
+    const _bestByEv={};
+    for (const r of _rawStaff){
+      if (!_bestByEv[r.ev]||pts(r)>pts(_bestByEv[r.ev])) _bestByEv[r.ev]=r;
+    }
+    const allStaff=Object.values(_bestByEv);
+    const n=allStaff.length;
+    const evList=[...new Set(activeAll().filter(r=>!r.isStaffetta).map(r=>r.ev))];
+    const C=getC();
+    const maxD = isProiezione ? 1 : C.nSel-C.minEv;
+    const nEvs=evList.length;
+    const totalMasks = 1<<n;
+    const totalSteps = totalMasks + 2*n + 1; // +1 per la fase finale
+    let doneSteps = 0;
+
+    // Stima combinazioni per info
+    let estCombs=0;
+    for(let nEv=C.minEv;nEv<=Math.min(C.nSel,nEvs);nEv++){
+      const nD=C.nSel-nEv; if(nD>maxD) continue;
+      let c=1; for(let i=0;i<Math.min(nEv,nEvs-nEv);i++) c=c*(nEvs-i)/(i+1);
+      estCombs+=Math.round(c);
+    }
+    console.log(`[Optimizer] ALL=${ALL.length} risultati · ${nEvs} gare individuali · staffette CdS: [${allStaff.map(r=>r.ev).join(', ')||'nessuna'}] · ${totalMasks} combinazioni staffette · ~${estCombs.toLocaleString('it')} combinazioni gare · maxD=${maxD}`);
+    setProgress(0, `Inizio · ${nEvs} gare · ~${estCombs.toLocaleString('it')} combinazioni · ${totalMasks} conf. staffette`);
+    await new Promise(r => setTimeout(r, 0));
+
+    let bestTotal=-1,bestSel=null;
+    staffAnalysis=[];
+    topCombinations=[];
+
+    // Fase 1 — tutti i sottoinsiemi di staffette (2^n)
+    for (let mask=0; mask<totalMasks; mask++){
+      const incl=allStaff.filter((_,i)=>mask&(1<<i));
+      const staffLabel = incl.length ? incl.map(r=>r.ev).join(' + ') : 'nessuna staffetta';
+      setProgress(doneSteps/totalSteps*100,
+        `Conf. staffette ${mask+1}/${totalMasks}: ${staffLabel}${bestTotal>0?' · miglior Σ '+bestTotal:''}…`);
+      await new Promise(r => setTimeout(r, 0)); // yield → UI si aggiorna
+      const {total,sel}=searchOptimal(incl, maxD);
+      if (sel&&sel.length===C.nSel){
+        topCombinations.push({total,sel:[...sel],inclStaff:staffLabel});
+        if (total>bestTotal){
+          bestTotal=total;bestSel=sel;
+          console.log(`[Optimizer] Nuovo miglior score: ${total} (maschera ${mask}: ${staffLabel})`);
         }
       }
-      topCombinations.sort((a,b)=>b.total-a.total);
-
-      // Analisi per ogni staffetta: con vs senza
-      for (const st of allStaff){
-        const {total:tC}=searchOptimal([st]);
-        const {total:tS}=searchOptimal([]);
-        const inOpt=bestSel?bestSel.some(r=>r.id===st.id):false;
-        staffAnalysis.push({staff:st,tCon:tC,tSenza:tS,delta:tC-tS,inOpt});
-      }
-
-      selectedIds.clear();
-      if (!bestSel){
-        const C=getC();
-        setNoteEst(`⚠ Impossibile trovare ${C.nSel} risultati con ≥${C.minEv} gare e tutti i vincoli soddisfatti.`+buildOptDiagnostic(), true);
-      } else {
-        setNoteEst('');
-        bestSel.forEach(r=>selectedIds.add(r.id));
-      }
-      renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
-      renderStaffettaAnalysis();
-    } finally {
-      document.getElementById('loading').classList.add('hidden');
-      _setLoadingMsg('Caricamento dati FIDAL…');
-      if (_lbar) _lbar.style.display='none';
-      if (_lsub) _lsub.textContent='';
+      doneSteps++;
     }
-  }, 50);
+    topCombinations.sort((a,b)=>b.total-a.total);
+
+    // Fase 2 — analisi per ogni staffetta: con vs senza
+    for (const [si, st] of allStaff.entries()){
+      setProgress(doneSteps/totalSteps*100,
+        `Analisi staffetta ${si+1}/${n}: ${st.ev}…`);
+      await new Promise(r => setTimeout(r, 0));
+      const {total:tC}=searchOptimal([st], maxD);
+      doneSteps++;
+      await new Promise(r => setTimeout(r, 0));
+      const {total:tS}=searchOptimal([], maxD);
+      doneSteps++;
+      const inOpt=bestSel?bestSel.some(r=>r.id===st.id):false;
+      staffAnalysis.push({staff:st,tCon:tC,tSenza:tS,delta:tC-tS,inOpt});
+    }
+
+    console.log(`[Optimizer] Completato. Miglior score: ${bestTotal}. Top combinazioni:`, topCombinations.slice(0,3).map(c=>({total:c.total,staff:c.inclStaff})));
+    setProgress(99, 'Rendering risultati…');
+    await new Promise(r => setTimeout(r, 0));
+
+    selectedIds.clear();
+    if (!bestSel){
+      setNoteEst(`⚠ Impossibile trovare ${C.nSel} risultati con ≥${C.minEv} gare e tutti i vincoli soddisfatti.`+buildOptDiagnostic(), true);
+    } else {
+      setNoteEst('');
+      bestSel.forEach(r=>selectedIds.add(r.id));
+    }
+    renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+    renderStaffettaAnalysis();
+  } finally {
+    document.getElementById('loading').classList.add('hidden');
+    _setLoadingMsg('Caricamento dati FIDAL…');
+    if (_lbar)  _lbar.style.display='none';
+    if (_lfill) { _lfill.classList.add('indeterminate'); _lfill.style.width='40%'; }
+    if (_lsub)  _lsub.textContent='';
+    if (_llog)  { _llog.style.display='none'; _llog.innerHTML=''; }
+  }
+}
+
+// ── CLASSIFICA REGIONALE ──────────────────────────────────
+async function computeClassifica(){
+  if (!isProiezione || !ALL.length){
+    console.log('[Classifica] Proiezione non caricata — carico da cache...');
+    await fetchProiezione(false);
+    return; // fetchProiezione chiama computeClassifica di nuovo dopo aver caricato
+  }
+
+  const content = document.getElementById('clas-screen-content');
+  const title   = document.getElementById('clas-screen-title');
+
+  // ── Percorso veloce: usa societies_meta pre-calcolata dal build ──────────
+  if (Object.keys(_societiesMeta).length > 0){
+    console.log('[Classifica] Uso societies_meta pre-calcolata dal JSON.');
+    const data = Object.entries(_societiesMeta).map(([cod, m]) => ({...m, cod}));
+    _renderClassifica(data, title, content);
+    return;
+  }
+
+  // ── Fallback: calcola da ALL client-side (somma punti, no optimizer) ─────
+  content.innerHTML = '<div style="color:var(--muted);font-size:.82rem;padding:.4rem 0">Calcolo classifica…</div>';
+  await new Promise(r=>setTimeout(r,0));
+
+  const _lKw=['peso','martello','giavellotto','disco','lancio','vortex','palla'];
+  const _sKw=['lungo','triplo','alto','asta','salto'];
+  const bySOC={};
+  for (const r of ALL){
+    const key=r.soc_cod||r.soc_nome; if (!key) continue;
+    if (!bySOC[key]) bySOC[key]={nome:r.soc_nome||key, results:[]};
+    bySOC[key].results.push(r);
+  }
+
+  const data = Object.values(bySOC).map(({nome, results})=>{
+    const evs=new Set(results.map(r=>r.ev));
+    const evLow=[...evs].map(e=>e.toLowerCase());
+    const n_lanci=evLow.filter(e=>_lKw.some(k=>e.includes(k))).length;
+    const n_salti=evLow.filter(e=>_sKw.some(k=>e.includes(k))).length;
+    const n_ev=evs.size;
+    let total_pts=0,pts_corsa=0,pts_lanci=0,pts_salti=0,pts_staffette=0;
+    for (const r of results){
+      const p=pts(r)||0; total_pts+=p;
+      const t=r.type||'corsa';
+      if (t==='corsa'||t==='ostacoli') pts_corsa+=p;
+      else if (t==='lancio')           pts_lanci+=p;
+      else if (t==='salto')            pts_salti+=p;
+      else if (t==='staffetta')        pts_staffette+=p;
+    }
+    return {nome,total_pts,pts_corsa,pts_lanci,pts_salti,pts_staffette,
+            num_gare:n_ev,n_lanci,n_salti,can_compete:n_ev>=10&&n_lanci>=2&&n_salti>=2};
+  });
+  console.log(`[Classifica] Calcolate ${data.length} società da ALL.`);
+  _renderClassifica(data, title, content);
+}
+
+function _renderClassifica(data, title, content){
+  const p=getFormParams();
+  // Ordina per score ottimale (se calcolato) altrimenti per total_pts
+  const _score = s => (s.optimal && s.optimal.score > 0) ? s.optimal.score : (s.total_pts || 0);
+  const eligible=data.filter(s=>s.can_compete).sort((a,b)=>_score(b)-_score(a));
+  const notElig=data.filter(s=>!s.can_compete).length;
+  console.log(`[Classifica] ${eligible.length} competitive, ${notElig} non eleggibili. Top 5:`,
+    eligible.slice(0,5).map(s=>({nome:s.nome,pts:s.total_pts})));
+
+  document.getElementById('clas-screen-title').textContent=`Proiezione Regionale — ${p.regione}`;
+  document.getElementById('clas-screen-sub').textContent=`CdS ${p.categoria} · ${p.tipo_attivita==='P'?'Outdoor':'Indoor'} ${p.anno} · ${eligible.length} competitive · ${notElig} escluse`;
+
+  if (!eligible.length){
+    content.innerHTML='<div style="color:var(--muted);font-size:.82rem">Nessuna società con requisiti CdS soddisfatti.</div>';
+    return;
+  }
+  const _scoreOf = s => (s.optimal&&s.optimal.score>0) ? s.optimal.score : (s.total_pts||0);
+  const maxPts = _scoreOf(eligible[0]);
+  const rows = eligible.flatMap((s,i)=>{
+    const hasOpt = s.optimal && s.optimal.score > 0;
+    const displayScore = _scoreOf(s);
+    const barW = Math.round(displayScore/maxPts*100);
+    const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}.`;
+    const rid = `clas-row-${i}`;
+
+    // Punteggio: "scheda ottimale" o "Σ totale disponibile"
+    const scoreCell = hasOpt
+      ? `<span style="font-weight:700">${s.optimal.score.toLocaleString('it')}</span>
+         <span title="Punteggio scheda ottimale calcolata (13 risultati, vincoli CdS)" style="font-size:.66rem;color:var(--green);margin-left:.3rem;cursor:help">scheda</span>`
+      : `${(s.total_pts||0).toLocaleString('it')}
+         <span title="Somma di tutti i punti disponibili — calcola il build per il punteggio scheda esatto" style="font-size:.66rem;color:var(--muted);margin-left:.3rem;cursor:help">Σ totale</span>`;
+
+    // Breakdown: Corsa (corse+ostacoli) · Salti · Lanci · Staffette
+    const bk = [
+      `🏃 ${(s.pts_corsa||0).toLocaleString('it')} cors.`,
+      `↑ ${(s.pts_salti||0).toLocaleString('it')} salt.`,
+      `⭕ ${(s.pts_lanci||0).toLocaleString('it')} lanc.`,
+    ];
+    if (s.pts_staffette) bk.push(`🔄 ${s.pts_staffette.toLocaleString('it')} staff.`);
+    const breakdown = bk.join(' · ');
+
+    // Bottone view data (solo se c'è optimal.sel)
+    const viewBtn = hasOpt
+      ? `<button class="clas-expand" onclick="toggleClasDetail('${rid}')">+</button>`
+      : '';
+
+    // Riga principale
+    const mainRow = `<tr>
+      <td class="clas-rank">${medal}</td>
+      <td>${s.nome}</td>
+      <td class="clas-score">${scoreCell}</td>
+      <td style="color:var(--muted);font-size:.71rem;white-space:nowrap">${breakdown}</td>
+      <td class="clas-bar-cell"><div class="clas-bar" style="width:${barW}%"></div></td>
+      <td style="width:28px">${viewBtn}</td>
+    </tr>`;
+
+    // Riga dettaglio (scheda ottimale espandibile)
+    let detailRow = '';
+    if (hasOpt && s.optimal.sel && s.optimal.sel.length) {
+      const detailRows = s.optimal.sel
+        .sort((a,b)=>(b.pts||0)-(a.pts||0))
+        .map(r=>{
+          const typeLbl = r.isStaffetta ? '<span style="color:#1565c0;font-size:.68rem;font-weight:700">STAFF</span>'
+                        : '<span style="color:var(--muted);font-size:.68rem">IND</span>';
+          return `<tr>
+            <td>${typeLbl}</td>
+            <td style="font-weight:600">${r.ev}</td>
+            <td>${r.athlete||''}</td>
+            <td>${r.perf||''}</td>
+            <td style="font-family:var(--mono);font-weight:700;color:var(--blue);text-align:right">${(r.pts||0).toLocaleString('it')}</td>
+          </tr>`;
+        }).join('');
+      detailRow = `<tr class="clas-detail" id="${rid}">
+        <td colspan="6">
+          <table class="clas-detail-table">
+            <thead><tr style="color:var(--muted);font-size:.67rem">
+              <th></th><th>Disciplina</th><th>Atleta</th><th>Prestazione</th><th style="text-align:right">Punti</th>
+            </tr></thead>
+            <tbody>${detailRows}</tbody>
+          </table>
+        </td>
+      </tr>`;
+    }
+    return [mainRow, detailRow].filter(Boolean);
+  }).join('');
+
+  content.innerHTML=`<table class="clas-table">
+    <thead><tr>
+      <th>#</th><th>Società</th>
+      <th title="'scheda' = ottimale calcolata; 'Σ totale' = somma tutti i punti disponibili">Punti</th>
+      <th style="font-size:.67rem">Corsa · Salti · Lanci · Staff</th>
+      <th></th><th></th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+function toggleClasDetail(rid){
+  const row = document.getElementById(rid);
+  if (!row) return;
+  const isOpen = row.classList.contains('open');
+  row.classList.toggle('open', !isOpen);
+  // Aggiorna il bottone +/-
+  const btn = row.previousElementSibling?.querySelector('.clas-expand');
+  if (btn) btn.textContent = isOpen ? '+' : '−';
 }
 
 // ── STAFFETTA ANALYSIS ────────────────────────────────────
