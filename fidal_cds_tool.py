@@ -316,6 +316,49 @@ _OPT_SALTI = {'lungo','triplo','alto','asta','salto'}
 def _opt_is_lancio(ev): return any(k in ev.lower() for k in _OPT_LANCI)
 def _opt_is_salto(ev):  return any(k in ev.lower() for k in _OPT_SALTI)
 
+def _opt_is_ostac(e):
+    return 'ostac' in e or ' hs' in e or 'hs ' in e or e.startswith('hs')
+
+# Programmi tecnici CdS (specchio di CDS_PROGRAMS nel JS)
+def _cds_program_cf(ev):
+    e = ev.lower()
+    return (('80' in e and ('piani' in e or _opt_is_ostac(e))) or
+            ('300' in e and (_opt_is_ostac(e) or 'piani' in e)) or
+            ('1000' in e and '3x' not in e and '3 x' not in e) or
+            '2000' in e or '1200' in e or
+            'asta' in e or 'in alto' in e or 'in lungo' in e or 'triplo' in e or
+            'peso' in e or 'martello' in e or 'disco' in e or 'giavellott' in e or
+            (re.search(r'4\s*[xX]\s*100(?!0)', ev) and 'staffetta' in e) or
+            'marcia' in e)
+
+def _cds_program_cm(ev):
+    e = ev.lower()
+    return (('80' in e and 'piani' in e) or
+            ('100' in e and _opt_is_ostac(e)) or
+            ('300' in e and (_opt_is_ostac(e) or 'piani' in e)) or
+            ('1000' in e and '3x' not in e and '3 x' not in e) or
+            '2000' in e or '1200' in e or
+            'asta' in e or 'in alto' in e or 'in lungo' in e or 'triplo' in e or
+            ('peso' in e and '4' in e) or
+            'martello' in e or 'disco' in e or 'giavellott' in e or
+            (re.search(r'4\s*[xX]\s*100(?!0)', ev) and 'staffetta' in e) or
+            'marcia' in e)
+
+def _cds_program_rm(ev):
+    e = ev.lower()
+    return (('60' in e and ('piani' in e or _opt_is_ostac(e))) or
+            ('1000' in e and '3x' not in e and '3 x' not in e) or
+            'marcia' in e or 'in alto' in e or 'in lungo' in e or
+            ('peso' in e and '2' in e) or 'vortex' in e or
+            (re.search(r'4\s*[xX]\s*100(?!0)', ev) and 'staffetta' in e))
+
+_CDS_PROGRAMS = {
+    'CF': _cds_program_cf,
+    'CM': _cds_program_cm,
+    'RF': _cds_program_rm,   # stesso programma tecnico dei Ragazzi
+    'RM': _cds_program_rm,
+}
+
 def _athlete_key(name):
     """Usa il cognome (prima parola) come chiave uniforme per il tracking atleti."""
     return name.split()[0].upper() if name else ''
@@ -376,8 +419,12 @@ def _compute_optimal_py(results, cat):
     min_lanci, min_salti = C['minLanci'], C['minSalti']
     max_athl_ind, max_d = C['maxAthlInd'], C['maxD']
 
-    ind = [r for r in results if not r.get('isStaffetta') and r.get('pts_ok')]
-    staff = [r for r in results if r.get('isStaffetta') and r.get('pts_ok')]
+    cds_prog = _CDS_PROGRAMS.get(cat)
+    def _in_cds(r):
+        return not cds_prog or cds_prog(r.get('ev', ''))
+
+    ind   = [r for r in results if not r.get('isStaffetta') and r.get('pts_ok') and _in_cds(r)]
+    staff = [r for r in results if r.get('isStaffetta')     and r.get('pts_ok') and _in_cds(r)]
     if not ind: return None
 
     # Raggruppa individuale per evento, top-25 max
