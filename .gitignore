@@ -14,6 +14,8 @@ dist/
 
 # User data (generated at runtime)
 manual_entries.json
+# Cache proiezione regionale (ogni utente la rigenera con il build)
+proiezione_*.json
 
 # IDE/tool config
 .claude/
