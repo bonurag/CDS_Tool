@@ -750,10 +750,33 @@ def api_proiezione_build():
                                 old_meta.get('num_gare') == new_meta['num_gare'] and
                                 old_meta.get('total_pts') == new_meta['total_pts'] and
                                 soc['cod'] in cached_by_soc):
-                            # Nessuna variazione: riutilizza dati in cache
-                            all_results.extend(cached_by_soc[soc['cod']])
-                            new_societies_meta[soc['cod']] = old_meta
+                            # Dati FIDAL invariati: riutilizza risultati dalla cache
+                            cached_results = cached_by_soc[soc['cod']]
+                            all_results.extend(cached_results)
                             unchanged_soc += 1
+
+                            # Anche per le società invariate: verifica e integra manual entries
+                            soc_manual = _match_manual_to_soc(
+                                manual_entries, soc['cod'], soc['nome'], cached_results)
+                            new_manual_count = len(soc_manual)
+                            old_manual_count = old_meta.get('manual_count', 0)
+
+                            if (new_meta.get('can_compete') and
+                                    (new_manual_count != old_manual_count or
+                                     not old_meta.get('optimal'))):
+                                # Manual entries cambiati o optimal mancante:
+                                # ricalcola con dati FIDAL cached + manual (senza re-fetch FIDAL)
+                                results_full = cached_results + soc_manual
+                                opt = _compute_optimal_py(results_full, cat)
+                                meta_upd = dict(old_meta)
+                                meta_upd['manual_count'] = new_manual_count
+                                meta_upd['data'] = results_full
+                                if opt:
+                                    meta_upd['optimal'] = opt
+                                new_societies_meta[soc['cod']] = meta_upd
+                            else:
+                                new_societies_meta[soc['cod']] = old_meta
+
                             yield _ev({'type': 'unchanged', 'soc': soc['nome'],
                                        'num_gare': new_meta['num_gare'],
                                        'total_pts': new_meta['total_pts'],
