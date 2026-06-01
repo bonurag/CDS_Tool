@@ -441,19 +441,30 @@ def _compute_optimal_py(results, cat):
     ev_list = list(by_ev.keys())
     dbl = [ev for ev in ev_list if len(by_ev[ev]) >= 2]
 
-    # Staffette valide per il programma CdS (solo 4x100)
-    best_staff_by_ev = {}
+    # Raggruppa staffette CdS (4x100) per tipo, tieni tutte le entry ordinate per punti
+    staff_by_ev = {}
     for r in staff:
         if re.search(r'4\s*[xX]\s*100(?!0)', r['ev']):
-            prev = best_staff_by_ev.get(r['ev'])
-            if not prev or (r.get('pts') or 0) > (prev.get('pts') or 0):
-                best_staff_by_ev[r['ev']] = r
-    staff_list = list(best_staff_by_ev.values())
+            staff_by_ev.setdefault(r['ev'], []).append(r)
+    for ev in staff_by_ev:
+        staff_by_ev[ev].sort(key=lambda r: r.get('pts') or 0, reverse=True)
+    staff_groups = list(staff_by_ev.values())
+
+    def _staff_combos(groups):
+        """Prodotto cartesiano: per ogni tipo scegli None (escludi) o una delle entry."""
+        if not groups:
+            yield []
+            return
+        first, *rest = groups
+        for tail in _staff_combos(rest):
+            yield [None] + tail
+            for entry in first:
+                yield [entry] + tail
 
     best_total, best_sel = -1, None
 
-    for mask in range(1 << min(len(staff_list), 3)):
-        incl = [staff_list[j] for j in range(len(staff_list)) if mask & (1 << j)]
+    for combo in _staff_combos(staff_groups):
+        incl = [r for r in combo if r is not None]
         staff_evs_m = {r['ev'] for r in incl}
         ev_full = ev_list + [ev for ev in staff_evs_m if ev not in ev_list]
         dbl_full = dbl  # staffette hanno 1 risultato, non sono in dbl
@@ -2746,6 +2757,15 @@ function _pruneForProiezione(nPerEv){
   }
   ALL = ALL.filter(r=>keep.has(r));
 }
+function* _staffCombos(groups){
+  // Prodotto cartesiano: per ogni tipo di staffetta scegli null (escludi) o una delle entry.
+  if (!groups.length){ yield []; return; }
+  const [first, ...rest] = groups;
+  for (const tail of _staffCombos(rest)){
+    yield [null, ...tail];
+    for (const entry of first) yield [entry, ...tail];
+  }
+}
 function* combIter(arr, k){
   const n=arr.length;
   if (k===0){yield[];return;} if (k>n) return;
@@ -2964,22 +2984,26 @@ async function computeOptimal(){
   let _savedALL = null; // riservato per usi futuri
 
   try {
-    // Tieni solo il risultato migliore per tipo staffetta (max 1 per ev)
-    // Esclude staffette fuori dal programma CdS della categoria corrente
+    // Raggruppa staffette CdS per tipo, tieni tutte le entry ordinate per punti.
+    // Il prodotto cartesiano (nessuna | una qualsiasi entry per tipo) garantisce che
+    // anche staffette con atlete diverse vengano valutate rispetto alle gare individuali.
     const _cdsProg=CDS_PROGRAMS[currentCategoria];
     const _rawStaff=activeAll().filter(r=>r.isStaffetta&&(!_cdsProg||_cdsProg(r.ev)));
-    const _bestByEv={};
+    const _byEvType={};
     for (const r of _rawStaff){
-      if (!_bestByEv[r.ev]||pts(r)>pts(_bestByEv[r.ev])) _bestByEv[r.ev]=r;
+      (_byEvType[r.ev]=_byEvType[r.ev]||[]).push(r);
     }
-    const allStaff=Object.values(_bestByEv);
-    const n=allStaff.length;
+    for (const ev of Object.keys(_byEvType)){
+      _byEvType[ev].sort((a,b)=>pts(b)-pts(a));
+    }
+    const staffGroups=Object.values(_byEvType); // [[r1a,r1b,...],[r2a,...],...]
+    const n=staffGroups.length;
     const evList=[...new Set(activeAll().filter(r=>!r.isStaffetta).map(r=>r.ev))];
     const C=getC();
     const maxD = isProiezione ? 1 : C.nSel-C.minEv;
     const nEvs=evList.length;
-    const totalMasks = 1<<n;
-    const totalSteps = totalMasks + 2*n + 1; // +1 per la fase finale
+    const totalCombos=staffGroups.reduce((acc,g)=>acc*(1+g.length),1);
+    const totalSteps = totalCombos + 2*n + 1;
     let doneSteps = 0;
 
     // Stima combinazioni per info
@@ -2989,35 +3013,38 @@ async function computeOptimal(){
       let c=1; for(let i=0;i<Math.min(nEv,nEvs-nEv);i++) c=c*(nEvs-i)/(i+1);
       estCombs+=Math.round(c);
     }
-    console.log(`[Optimizer] ALL=${ALL.length} risultati · ${nEvs} gare individuali · staffette CdS: [${allStaff.map(r=>r.ev).join(', ')||'nessuna'}] · ${totalMasks} combinazioni staffette · ~${estCombs.toLocaleString('it')} combinazioni gare · maxD=${maxD}`);
-    setProgress(0, `Inizio · ${nEvs} gare · ~${estCombs.toLocaleString('it')} combinazioni · ${totalMasks} conf. staffette`);
+    console.log(`[Optimizer] ALL=${ALL.length} risultati · ${nEvs} gare individuali · staffette CdS: [${staffGroups.map(g=>g[0].ev).join(', ')||'nessuna'}] (${totalCombos} conf. staffette) · ~${estCombs.toLocaleString('it')} combinazioni gare · maxD=${maxD}`);
+    setProgress(0, `Inizio · ${nEvs} gare · ~${estCombs.toLocaleString('it')} combinazioni · ${totalCombos} conf. staffette`);
     await new Promise(r => setTimeout(r, 0));
 
     let bestTotal=-1,bestSel=null;
     staffAnalysis=[];
     topCombinations=[];
 
-    // Fase 1 — tutti i sottoinsiemi di staffette (2^n)
-    for (let mask=0; mask<totalMasks; mask++){
-      const incl=allStaff.filter((_,i)=>mask&(1<<i));
+    // Fase 1 — prodotto cartesiano staffette (nessuna | una entry per tipo)
+    let comboIdx=0;
+    for (const combo of _staffCombos(staffGroups)){
+      const incl=combo.filter(Boolean);
       const staffLabel = incl.length ? incl.map(r=>r.ev).join(' + ') : 'nessuna staffetta';
       setProgress(doneSteps/totalSteps*100,
-        `Conf. staffette ${mask+1}/${totalMasks}: ${staffLabel}${bestTotal>0?' · miglior Σ '+bestTotal:''}…`);
-      await new Promise(r => setTimeout(r, 0)); // yield → UI si aggiorna
+        `Conf. staffette ${comboIdx+1}/${totalCombos}: ${staffLabel}${bestTotal>0?' · miglior Σ '+bestTotal:''}…`);
+      await new Promise(r => setTimeout(r, 0));
       const {total,sel}=searchOptimal(incl, maxD);
       if (sel&&sel.length===C.nSel){
         topCombinations.push({total,sel:[...sel],inclStaff:staffLabel});
         if (total>bestTotal){
           bestTotal=total;bestSel=sel;
-          console.log(`[Optimizer] Nuovo miglior score: ${total} (maschera ${mask}: ${staffLabel})`);
+          console.log(`[Optimizer] Nuovo miglior score: ${total} (combo ${comboIdx}: ${staffLabel})`);
         }
       }
       doneSteps++;
+      comboIdx++;
     }
     topCombinations.sort((a,b)=>b.total-a.total);
 
-    // Fase 2 — analisi per ogni staffetta: con vs senza
-    for (const [si, st] of allStaff.entries()){
+    // Fase 2 — analisi per ogni tipo di staffetta: con (entry migliore) vs senza
+    for (const [si, staffOpts] of staffGroups.entries()){
+      const st=staffOpts[0];
       setProgress(doneSteps/totalSteps*100,
         `Analisi staffetta ${si+1}/${n}: ${st.ev}…`);
       await new Promise(r => setTimeout(r, 0));
@@ -3026,7 +3053,7 @@ async function computeOptimal(){
       await new Promise(r => setTimeout(r, 0));
       const {total:tS}=searchOptimal([], maxD);
       doneSteps++;
-      const inOpt=bestSel?bestSel.some(r=>r.id===st.id):false;
+      const inOpt=bestSel?staffOpts.some(opt=>bestSel.some(r=>r.id===opt.id)):false;
       staffAnalysis.push({staff:st,tCon:tC,tSenza:tS,delta:tC-tS,inOpt});
     }
 
