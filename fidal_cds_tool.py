@@ -272,10 +272,13 @@ def _normalize_events(data, categoria):
         if key:
             row['ev'] = key
 
-def _soc_meta(results):
+def _soc_meta(results, cat=None):
     """Statistiche aggregate per una società: totale punti, breakdown per tipo, eleggibilità."""
     _lanci_kw = {'peso','martello','giavellotto','disco','lancio','vortex','palla'}
     _salti_kw = {'lungo','triplo','alto','asta','salto'}
+    cds_prog = _CDS_PROGRAMS.get(cat) if cat else None
+    if cds_prog:
+        results = [r for r in results if cds_prog(r.get('ev', ''))]
     evs = {r['ev'] for r in results}
     total = pts_corsa = pts_lanci = pts_salti = pts_staff = 0
     for r in results:
@@ -735,7 +738,7 @@ def api_proiezione_build():
                          'vento': vento, 'limite': '5', 'societa': soc['cod']}
                     results, _ = _do_fidal_fetch(p)
                     if results:
-                        new_meta = _soc_meta(results)
+                        new_meta = _soc_meta(results, cat)
                         old_meta = cached_meta.get(soc['cod'], {})
 
                         # Forza aggiornamento se can_compete ma manca optimal/data,
@@ -1379,6 +1382,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
       <span class="tag" id="clas-screen-ts"></span>
     </div>
     <button class="btn-refresh-cache" onclick="fetchProiezione(true)" style="margin-right:.5rem">🔄 Aggiorna dati</button>
+    <button class="btn-pdf" onclick="downloadClassificaCSV()" style="margin-right:.4rem">⬇ CSV</button>
+    <button class="btn-pdf" onclick="printClassificaPDF()" style="margin-right:.5rem">⬇ Stampa / PDF</button>
     <button class="btn-back" onclick="goBack()">← Nuova ricerca</button>
   </div>
   <div style="padding:1.5rem 2rem">
@@ -1696,6 +1701,7 @@ function getC(){ return CONSTRAINTS[currentCategoria] || CONSTRAINTS.default; }
 // ── STATO ───────────────────────────────────────────────
 let ALL = [], selectedIds = new Set(), userPts = {}, staffAnalysis = [], excludedEvs = new Set(), topCombinations = [];
 let _societiesMeta = {}; // pre-calcolato dal build, caricato con la proiezione
+let _classificaRanked = null; // ultimo ranked salvato da _renderClassifica, usato per export
 let currentCategoria = '', currentAnno = 2026, savedManualEntries = [];
 let unavailableAthletes = new Set(), minDateFilter = null;
 let societaList = [];
@@ -2728,6 +2734,8 @@ function _pruneForProiezione(nPerEv){
   // Per le staffette: tieni solo il top 1 per disciplina (migliore della regione).
   // Per le gare individuali: tieni i top nPerEv (per gestire conflitti atleti).
   // NOTA: usa riferimento oggetto (non r.id) — in proiezione gli id si ripetono tra società.
+  const _cdsProg = CDS_PROGRAMS[currentCategoria];
+  if (_cdsProg) ALL = ALL.filter(r => _cdsProg(r.ev));
   const byEv = {};
   ALL.forEach(r => { (byEv[r.ev] = byEv[r.ev]||[]).push(r); });
   const keep = new Set(); // Set di oggetti, non di id
@@ -3070,8 +3078,10 @@ async function computeClassifica(){
 
   const _lKw=['peso','martello','giavellotto','disco','lancio','vortex','palla'];
   const _sKw=['lungo','triplo','alto','asta','salto'];
+  const _cdsProgClas = CDS_PROGRAMS[currentCategoria];
   const bySOC={};
   for (const r of ALL){
+    if (_cdsProgClas && !_cdsProgClas(r.ev)) continue;
     const key=r.soc_cod||r.soc_nome; if (!key) continue;
     if (!bySOC[key]) bySOC[key]={nome:r.soc_nome||key, results:[]};
     bySOC[key].results.push(r);
@@ -3133,6 +3143,7 @@ function _renderClassifica(data, title, content){
     return;
   }
 
+  _classificaRanked = ranked;
   const maxPts = ranked[0].optimal.score;
   const rows = ranked.flatMap((s,i)=>{
     const barW = Math.round(s.optimal.score/maxPts*100);
@@ -3216,6 +3227,106 @@ function toggleClasDetail(rid){
   // Aggiorna il bottone +/-
   const btn = row.previousElementSibling?.querySelector('.clas-expand');
   if (btn) btn.textContent = isOpen ? '+' : '−';
+}
+
+// ── CLASSIFICA EXPORT ────────────────────────────────────
+function downloadClassificaCSV(){
+  if (!_classificaRanked || !_classificaRanked.length){ alert('Nessuna classifica disponibile. Carica prima la proiezione regionale.'); return; }
+  const p = getFormParams();
+  const hdr = ['Rank','Società','Punti_CdS','Corsa','Salti','Lanci','Staffette','Gare_CdS','N_Lanci','N_Salti'];
+  const rows = [hdr];
+  _classificaRanked.forEach((s,i)=>{
+    rows.push([
+      i+1, s.nome, s.optimal.score,
+      s.pts_corsa||0, s.pts_salti||0, s.pts_lanci||0, s.pts_staffette||0,
+      s.num_gare||0, s.n_lanci||0, s.n_salti||0,
+    ]);
+    if (s.optimal.sel && s.optimal.sel.length){
+      rows.push(['','— Scheda ottimale —','','','','','','','','']);
+      s.optimal.sel.slice().sort((a,b)=>(b.pts||0)-(a.pts||0)).forEach(r=>{
+        rows.push(['', '', r.pts||0, '', '', '', '', r.ev, r.athlete||'', r.perf||'']);
+      });
+    }
+  });
+  const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+  const blob = new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  const tag = `Classifica_${p.categoria}_${p.tipo_attivita==='P'?'Outdoor':'Indoor'}_${p.anno}_${p.regione}`;
+  a.download = `${tag}.csv`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+
+function printClassificaPDF(){
+  if (!_classificaRanked || !_classificaRanked.length){ alert('Nessuna classifica disponibile. Carica prima la proiezione regionale.'); return; }
+  const p = getFormParams();
+  const today = new Date().toLocaleDateString('it-IT',{day:'2-digit',month:'2-digit',year:'numeric'});
+  const tipoLbl = p.tipo_attivita==='P' ? 'Outdoor' : 'Indoor';
+  const titleStr = `Proiezione Regionale — ${p.regione}`;
+  const subStr   = `CdS ${p.categoria} · ${tipoLbl} ${p.anno}`;
+
+  const medalStr = i => i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}.`;
+
+  const mainRows = _classificaRanked.map((s,i)=>{
+    const bk = [
+      `🏃 ${(s.pts_corsa||0).toLocaleString('it')}`,
+      `↑ ${(s.pts_salti||0).toLocaleString('it')}`,
+      `⭕ ${(s.pts_lanci||0).toLocaleString('it')}`,
+    ];
+    if (s.pts_staffette) bk.push(`🔄 ${s.pts_staffette.toLocaleString('it')}`);
+    const rowBg = i%2===0 ? '' : 'background:#f8fafc';
+    return `<tr style="border-bottom:1px solid #e2e8f0;${rowBg}">
+      <td style="padding:6px 8px;font-size:13pt;text-align:center;width:36px">${medalStr(i)}</td>
+      <td style="padding:6px 8px;font-weight:700;font-size:9.5pt">${s.nome}</td>
+      <td style="padding:6px 8px;font-family:monospace;font-weight:800;font-size:11pt;color:#054FAE;text-align:right;white-space:nowrap">${s.optimal.score.toLocaleString('it')}</td>
+      <td style="padding:6px 8px;font-size:7.5pt;color:#555;white-space:nowrap">${bk.join(' · ')}</td>
+    </tr>`;
+  }).join('');
+
+  const html = `<!DOCTYPE html>
+<html lang="it"><head>
+<meta charset="UTF-8">
+<title>${titleStr}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Arial',sans-serif;padding:14mm 18mm;color:#0d1f3c;font-size:10pt}
+  @page{size:A4;margin:0}
+  @media print{body{padding:10mm 14mm}}
+</style>
+</head><body>
+
+<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px;border-bottom:3px solid #054FAE;padding-bottom:10px">
+  <div>
+    <div style="font-size:7pt;text-transform:uppercase;letter-spacing:.1em;color:#6b82a0;margin-bottom:3px">Campionato di Società — Proiezione Regionale</div>
+    <div style="font-size:18pt;font-weight:800;color:#054FAE;line-height:1.1">${titleStr}</div>
+    <div style="font-size:10pt;color:#444;margin-top:3px">${subStr}</div>
+  </div>
+  <div style="text-align:right;font-size:8pt;color:#6b82a0">
+    <div>Generato il ${today}</div>
+    <div style="margin-top:4px;font-size:7pt">FIDAL CdS Tool</div>
+  </div>
+</div>
+
+<table style="width:100%;border-collapse:collapse">
+  <thead>
+    <tr style="background:#054FAE;color:#fff">
+      <th style="padding:6px 8px;text-align:center;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase;width:36px">#</th>
+      <th style="padding:6px 8px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase">Società</th>
+      <th style="padding:6px 8px;text-align:right;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase;width:90px">Punti CdS</th>
+      <th style="padding:6px 8px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase">Corsa · Salti · Lanci · Staff</th>
+    </tr>
+  </thead>
+  <tbody>${mainRows}</tbody>
+</table>
+
+<div style="margin-top:10px;font-size:7pt;color:#999">Punti CdS = scheda ottimale calcolata con vincoli CdS (13 risultati, min 10 gare, min 2 lanci, min 2 salti)</div>
+
+<script>window.onload=function(){window.print();}<\/script>
+</body></html>`;
+
+  const w = window.open('','_blank','width=860,height=700');
+  w.document.open(); w.document.write(html); w.document.close();
 }
 
 // ── STAFFETTA ANALYSIS ────────────────────────────────────
