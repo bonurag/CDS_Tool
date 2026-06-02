@@ -327,7 +327,7 @@ def _cds_program_cf(ev):
     e = ev.lower()
     return (('80' in e and ('piani' in e or _opt_is_ostac(e))) or
             ('300' in e and (_opt_is_ostac(e) or 'piani' in e)) or
-            ('1000' in e and '3x' not in e and '3 x' not in e) or
+            (bool(re.search(r'(?<!\d)1000(?!\d)', e)) and '3x' not in e and '3 x' not in e) or
             '2000' in e or '1200' in e or
             'asta' in e or 'in alto' in e or 'in lungo' in e or 'triplo' in e or
             'peso' in e or 'martello' in e or 'disco' in e or 'giavellott' in e or
@@ -337,9 +337,9 @@ def _cds_program_cf(ev):
 def _cds_program_cm(ev):
     e = ev.lower()
     return (('80' in e and 'piani' in e) or
-            ('100' in e and _opt_is_ostac(e)) or
+            (bool(re.search(r'(?<!\d)100(?!\d)', e)) and _opt_is_ostac(e)) or
             ('300' in e and (_opt_is_ostac(e) or 'piani' in e)) or
-            ('1000' in e and '3x' not in e and '3 x' not in e) or
+            (bool(re.search(r'(?<!\d)1000(?!\d)', e)) and '3x' not in e and '3 x' not in e) or
             '2000' in e or '1200' in e or
             'asta' in e or 'in alto' in e or 'in lungo' in e or 'triplo' in e or
             ('peso' in e and '4' in e) or
@@ -349,8 +349,8 @@ def _cds_program_cm(ev):
 
 def _cds_program_rm(ev):
     e = ev.lower()
-    return (('60' in e and ('piani' in e or _opt_is_ostac(e))) or
-            ('1000' in e and '3x' not in e and '3 x' not in e) or
+    return ((bool(re.search(r'(?<!\d)60(?!\d)', e)) and ('piani' in e or _opt_is_ostac(e))) or
+            (bool(re.search(r'(?<!\d)1000(?!\d)', e)) and '3x' not in e and '3 x' not in e) or
             'marcia' in e or 'in alto' in e or 'in lungo' in e or
             ('peso' in e and '2' in e) or 'vortex' in e or
             (re.search(r'4\s*[xX]\s*100(?!0)', ev) and 'staffetta' in e))
@@ -1655,24 +1655,24 @@ const TYPE_LBL   = {corsa:'Corsa',ostacoli:'Ostacoli',salto:'Salto',lancio:'Lanc
 const _isOstac = e => e.includes('ostac') || e.includes(' hs') || e.includes('hs ') || e.startsWith('hs');
 
 const CDS_PROGRAMS = {
-  // Ragazzi: 60hs, 60, 1000, Marcia 2km, Alto, Lungo, Peso gomma 2kg, Vortex, Staffetta 4x100
+  // Ragazzi/Ragazze: 60hs, 60, 1000, Marcia 2km, Alto, Lungo, Peso 2kg, Vortex, 4x100
   RM: ev => {
     const e = ev.toLowerCase();
-    return (e.includes('60') && (e.includes('piani') || _isOstac(e))) ||
-           (e.includes('1000') && !e.includes('3x') && !e.includes('3 x')) ||
+    return (/(?<!\d)60(?!\d)/.test(e) && (e.includes('piani') || _isOstac(e))) ||
+           (/(?<!\d)1000(?!\d)/.test(e) && !e.includes('3x') && !e.includes('3 x')) ||
            e.includes('marcia') || e.includes('in alto') || e.includes('in lungo') ||
            (e.includes('peso') && e.includes('2')) ||
            e.includes('vortex') ||
            (e.includes('staffetta') && /4\s*[xX]\s*100(?!0)/.test(e));
   },
-  // Cadetti: 100hs, 300hs, 80, 300, 1000, 2000, 1200 siepi, Asta, Alto, Lungo, Triplo,
-  //          Peso 4kg, Martello 4kg, Disco 1,5kg, Giavellotto 600g, Staffetta 4x100, Marcia 5km
+  // Cadetti: 100hs, 80, 300hs, 300, 1000, 2000, 1200 siepi, Asta, Alto, Lungo, Triplo,
+  //          Peso 4kg, Martello 4kg, Disco 1.5kg, Giavellotto 600g, 4x100, Marcia 5km
   CM: ev => {
     const e = ev.toLowerCase();
     return (e.includes('80') && e.includes('piani')) ||
-           (e.includes('100') && _isOstac(e)) ||
+           (/(?<!\d)100(?!\d)/.test(e) && _isOstac(e)) ||
            (e.includes('300') && (_isOstac(e) || e.includes('piani'))) ||
-           (e.includes('1000') && !e.includes('3x') && !e.includes('3 x')) ||
+           (/(?<!\d)1000(?!\d)/.test(e) && !e.includes('3x') && !e.includes('3 x')) ||
            e.includes('2000') || e.includes('1200') ||
            e.includes('asta') || e.includes('in alto') || e.includes('in lungo') ||
            e.includes('triplo') ||
@@ -1689,7 +1689,7 @@ CDS_PROGRAMS.CF = ev => {
   const e = ev.toLowerCase();
   return (e.includes('80') && (e.includes('piani') || _isOstac(e))) ||
          (e.includes('300') && (_isOstac(e) || e.includes('piani'))) ||
-         (e.includes('1000') && !e.includes('3x') && !e.includes('3 x')) ||
+         (/(?<!\d)1000(?!\d)/.test(e) && !e.includes('3x') && !e.includes('3 x')) ||
          e.includes('2000') || e.includes('1200') ||
          e.includes('asta') || e.includes('in alto') || e.includes('in lungo') ||
          e.includes('triplo') ||
@@ -2469,6 +2469,11 @@ function submitManual(){
   if (!ev)     { errEl.textContent='⚠ Inserisci il nome della gara.'; return; }
   if (!perf)   { errEl.textContent='⚠ Inserisci la prestazione.'; return; }
   if (!athlRaw){ errEl.textContent='⚠ Inserisci almeno un/una atleta.'; return; }
+  const _cdsCheck = CDS_PROGRAMS[currentCategoria];
+  if (_cdsCheck && !_cdsCheck(ev)){
+    errEl.style.color='var(--warn,#e67e00)';
+    errEl.textContent=`⚠ "${ev}" non è nel programma CdS ${currentCategoria} — verrà salvato ma escluso dall'ottimizzatore.`;
+  }
 
   const isStaff=(tipo==='staffetta');
   const staffAthl=isStaff ? athlRaw.split(/[,;\/]/).map(s=>s.trim()).filter(Boolean) : null;
