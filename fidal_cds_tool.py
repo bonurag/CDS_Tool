@@ -3403,6 +3403,7 @@ if __name__ == '__main__':
 ║   FIDAL CdS Tool — Scheda Provinciale        ║
 ║   → http://localhost:{port}                     ║
 ║   Ctrl+C per uscire                          ║
+║   Build: e62966d (optimizer v3 + fix manual) ║
 ╚══════════════════════════════════════════════╝
 """)
     app.run(port=port, debug=False, use_reloader=False)
