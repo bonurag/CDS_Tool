@@ -362,9 +362,30 @@ def api_ottimizza():
     from core.cds_optimizer import CdsOptimizer
     try:
         payload = request.get_json()
-        results = payload.get('data', [])
-        cat = payload.get('categoria', 'CF')
-        
+        results = list(payload.get('data', []))
+        cat     = payload.get('categoria', 'CF')
+        soc_cod = payload.get('soc_cod', '')
+        soc_nome = payload.get('soc_nome', '')
+
+        # Normalizza i nomi evento (i dati FIDAL sono già normalizzati lato server,
+        # ma quelli manuali arrivano dal browser senza normalizzazione).
+        _normalize_events(results, cat)
+
+        # Integra le manual entries salvate sul server per questa società,
+        # così vengono considerate anche se il browser non le ha ricaricate.
+        if soc_cod or soc_nome:
+            manual_all = _read_manual().get(cat, [])
+            existing_saved_ids = {r.get('savedId') for r in results if r.get('savedId')}
+            for entry in manual_all:
+                if entry.get('savedId') in existing_saved_ids:
+                    continue  # già presente nel payload
+                if soc_cod and entry.get('soc_cod') and entry.get('soc_cod') != soc_cod:
+                    continue
+                if not soc_cod and soc_nome and entry.get('soc_nome') and entry.get('soc_nome') != soc_nome:
+                    continue
+                results.append(entry)
+            _normalize_events(results, cat)
+
         opt = CdsOptimizer.compute_optimal(results, cat)
         return jsonify({'ok': True, 'optimal': opt})
     except Exception as e:
@@ -2873,8 +2894,11 @@ async function computeOptimal(){
       const active = activeAll();
       const C=getC();
       
+      const _p = getFormParams();
       const payload = {
           categoria: currentCategoria,
+          soc_cod:  _p.societa || '',
+          soc_nome: document.getElementById('f-societa-name')?.value?.trim() || '',
           data: active.map(r => {
             const ret = {...r};
             ret.pts = pts(r);
