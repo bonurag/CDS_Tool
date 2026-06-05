@@ -237,11 +237,19 @@ class CdsOptimizer:
         ev_list = sorted(by_ev.keys(), key=lambda ev: by_ev[ev][0].get('pts') or 0, reverse=True)
         dbl = [ev for ev in ev_list if len(by_ev[ev]) >= 2]
 
-        # Raggruppa staffette CdS (4x100) per tipo
+        # Raggruppa staffette CdS (4x100) per tipo.
+        # NORMALIZZA il nome prima del raggruppamento: "Staffetta 4 X 100",
+        # "4X100", "4 x 100" ecc. sono la stessa gara — devono stare nello
+        # stesso gruppo così l'optimizer ne sceglie AL MASSIMO UNA.
+        _STAFF_4X100 = 'Staffetta 4X100'
         staff_by_ev = {}
         for r in staff:
             if re.search(r'4\s*[xX]\s*100(?!0)', r['ev']):
-                staff_by_ev.setdefault(r['ev'], []).append(r)
+                # Copia shallow con nome normalizzato: garantisce coerenza tra
+                # staff_evs_m, ev_full, ev_sub e il check in opt_assign_best.
+                r_norm = dict(r)
+                r_norm['ev'] = _STAFF_4X100
+                staff_by_ev.setdefault(_STAFF_4X100, []).append(r_norm)
         for ev in staff_by_ev:
             staff_by_ev[ev].sort(key=lambda r: r.get('pts') or 0, reverse=True)
         staff_groups = list(staff_by_ev.values())
