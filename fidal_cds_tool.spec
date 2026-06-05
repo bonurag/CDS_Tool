@@ -2,22 +2,28 @@
 
 a = Analysis(
     ['fidal_cds_tool.py'],
-    pathex=[],
+    pathex=['.'],
     binaries=[],
     datas=[
-        ('Cadette.json', '.'),
-        ('Cadetti.json', '.'),
-        ('Ragazze.json', '.'),
-        ('Ragazzi.json', '.'),
+        ('data/Cadette.json', 'data'),
+        ('data/Cadetti.json', 'data'),
+        ('data/Ragazze.json', 'data'),
+        ('data/Ragazzi.json', 'data'),
+        ('core/cds_utils.py', 'core'),
+        ('core/cds_optimizer.py', 'core'),
     ],
     hiddenimports=[
         'flask',
         'werkzeug',
         'werkzeug.serving',
         'werkzeug.debug',
+        'werkzeug.routing',
+        'werkzeug.exceptions',
         'requests',
         'bs4',
-        'beautifulsoup4',
+        'html.parser',
+        'core.cds_utils',
+        'core.cds_optimizer',
     ],
     hookspath=[],
     hooksconfig={},
@@ -41,9 +47,9 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,          # mostra finestra terminale con log del server
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
-    icon=None,             # sostituire con 'icon.ico' se disponibile
+    icon=None,
 )

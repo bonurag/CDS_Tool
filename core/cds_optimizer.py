@@ -1,7 +1,11 @@
 import time
 import re
 from itertools import combinations
+from math import comb
 from core.cds_utils import CdsUtils
+
+# Tetto massimo assoluto in secondi (fallback di sicurezza).
+OPT_TIME_BUDGET_MAX = 300
 
 class CdsOptimizer:
     """
@@ -23,30 +27,33 @@ class CdsOptimizer:
     @staticmethod
     def _staff_combos(groups):
         """
-        Generatore cartesiano per la prova di tutte le staffette:
-        per ogni evento di staffetta prova a non scegliere nessuno (None) o uno qualsiasi tra le formazioni qualificate.
+        Generatore cartesiano per la prova di tutte le staffette.
+        Emette prima le combinazioni CON staffetta (punteggi più alti → B&B
+        imposta subito una baseline elevata e pota il pass senza staffetta),
+        poi le combinazioni senza (None).
         """
         if not groups:
             yield []
             return
         first, *rest = groups
         for tail in CdsOptimizer._staff_combos(rest):
-            yield [None] + tail
-            for entry in first:
+            for entry in first:          # con staffetta — prima
                 yield [entry] + tail
+            yield [None] + tail          # senza staffetta — dopo
 
     @staticmethod
-    def opt_assign_best(by_ev, ev_sub, dbl_set, incl_staff, n_sel, max_athl_ind):
+    def opt_assign_best(by_ev, ev_sub, dbl_set, incl_staff, n_sel, max_athl_ind, deadline=None):
         """
         Backtracking DFS for optimal assignment. Evita i gridlock dell'approccio greedy
         testando la profondità e massimizzando il risultato globalmente.
-        
+
         :param by_ev: Dizionario {evento: list[risultati]} degli eventi individuali
         :param ev_sub: Sottoinsieme esatto delle gare valutate in questo nodo (es. 10 eventi)
         :param dbl_set: Set di gare raddoppiate (es. in cui prenderemo 2 risultati)
         :param incl_staff: Lista di staffette fissate incluse nel calcolo
         :param n_sel: Numero di gare totali attese (es. 13)
         :param max_athl_ind: Massimo di risultati individuali imputabili al singolo atleta
+        :param deadline: Timestamp float (time.time()) oltre il quale interrompere il DFS
         :return: (lista dei risultati scelti, punteggio totale intero) oppure (None, -1) se sforo
         """
         ev_cap = {ev: (2 if ev in dbl_set else 1) for ev in ev_sub}
@@ -90,12 +97,14 @@ class CdsOptimizer:
 
         def dfs(slot_idx, current_score, current_sel, ac_t, ac_i, used_ids, last_cand_idx):
             nonlocal best_score, best_sel
+            if deadline is not None and time.time() > deadline:
+                return
             if slot_idx == len(slots_to_fill):
                 if current_score > best_score:
                     best_score = current_score
                     best_sel = current_sel[:]
                 return
-                
+
             # Pruning
             if current_score + max_rem[slot_idx] <= best_score:
                 return
@@ -141,14 +150,65 @@ class CdsOptimizer:
         return final_sel, sum(r.get('pts') or 0 for r in final_sel)
 
     @classmethod
-    def compute_optimal(cls, results, cat):
+    def _estimate_budget(cls, results, cat):
+        """
+        Calcola il budget di tempo adattivo in secondi in funzione della complessità
+        combinatoria del problema (numero di eventi e candidati per gara).
+
+        Logica:
+        - Conta il numero totale di chiamate a opt_assign_best che il loop esterno
+          produrrebbe: Σ C(n_gare, k) × Σ C(n_doppie, j) per ogni k,j valido.
+        - Il costo per chiamata dipende dall'efficacia del Branch & Bound:
+          più candidati per gara → pruning più aggressivo → ogni chiamata è più veloce.
+          Calibrato empiricamente su ~9 atleti / 14 gare / ~3 cand/gara ≈ 25 s.
+        - Il risultato viene raddoppiato come margine di sicurezza e clampato tra
+          15 s (minimo utile) e OPT_TIME_BUDGET_MAX.
+        """
+        C = cls.CAT_CONSTRAINTS.get(cat, cls.CAT_CONSTRAINTS['CF'])
+        n_sel, min_ev, max_d = C['nSel'], C['minEv'], C['maxD']
+
+        ind = [r for r in results if not r.get('isStaffetta') and r.get('pts_ok')]
+        by_ev = {}
+        for r in ind:
+            by_ev.setdefault(r['ev'], []).append(r)
+
+        n_ev_tot = len(by_ev)
+        if n_ev_tot < min_ev:
+            return 5  # non competitiva, esce quasi subito
+
+        n_dbl = sum(1 for v in by_ev.values() if len(v) >= 2)
+        # media candidati per gara, capped a 15 (top-15 usati nel DFS)
+        avg_cands = sum(min(len(v), 15) for v in by_ev.values()) / n_ev_tot
+
+        # Numero totale di chiamate al DFS (loop esterno: eventi × doppie)
+        total_calls = 0
+        for k in range(min_ev, min(n_sel, n_ev_tot) + 1):
+            nd = n_sel - k
+            if nd > max_d:
+                continue
+            total_calls += comb(n_ev_tot, k) * sum(comb(n_dbl, j) for j in range(nd + 1))
+
+        # Costo per chiamata: 0.5 ms base, ridotto con B&B più efficace
+        # (avg_cands / 3)^2.5 calibrato su punto noto: 3 cand/gara → 0.5ms/call
+        bb_factor = max((avg_cands / 3.0) ** 2.5, 0.3)
+        cost_per_call = 5e-4 / bb_factor
+
+        estimated = total_calls * cost_per_call
+        # Margine di sicurezza ×2, minimo 15 s, massimo OPT_TIME_BUDGET_MAX
+        return max(15, min(OPT_TIME_BUDGET_MAX, int(estimated * 2) + 10))
+
+    @classmethod
+    def compute_optimal(cls, results, cat, time_budget=None):
         """
         Calcola la scheda ottimale per una società per la categoria specificata.
         Restituisce un dizionario coi risultati validati o None.
-        
+
         :param results: Array coi dizionari risultati fidal parsati.
         :param cat: Stringa denominazione categoria (CF, CM, RF, RM, ecc)
+        :param time_budget: Secondi massimi (None = nessun limite, risultato garantito ottimale).
+                           Usare solo se si accetta un risultato sub-ottimale in cambio di velocità.
         """
+        deadline = (time.time() + time_budget) if time_budget is not None else None
         C = cls.CAT_CONSTRAINTS.get(cat, cls.CAT_CONSTRAINTS['CF'])
         n_sel, min_ev = C['nSel'], C['minEv']
         min_lanci, min_salti = C['minLanci'], C['minSalti']
@@ -171,7 +231,10 @@ class CdsOptimizer:
             by_ev[ev].sort(key=lambda r: r.get('pts') or 0, reverse=True)
             by_ev[ev] = by_ev[ev][:25]
 
-        ev_list = list(by_ev.keys())
+        # Ordina gli eventi per punteggio massimo decrescente: combinations() genererà
+        # prima i sottoinsiemi con gli eventi più redditizi, il B&B imposta subito
+        # una baseline alta e pota aggressivamente il resto.
+        ev_list = sorted(by_ev.keys(), key=lambda ev: by_ev[ev][0].get('pts') or 0, reverse=True)
         dbl = [ev for ev in ev_list if len(by_ev[ev]) >= 2]
 
         # Raggruppa staffette CdS (4x100) per tipo
@@ -186,25 +249,113 @@ class CdsOptimizer:
         best_total, best_sel = -1, None
 
         for combo in cls._staff_combos(staff_groups):
+            if deadline is not None and time.time() > deadline:
+                break
             incl = [r for r in combo if r is not None]
             staff_evs_m = {r['ev'] for r in incl}
-            ev_full = ev_list + [ev for ev in staff_evs_m if ev not in ev_list]
+            # Staffetta in TESTA a ev_full: combinations() genera prima i sottoinsiemi
+            # che la includono (posizione ~30 su 2000 vs ~1000 su 3000), trovando
+            # subito la soluzione ottimale e permettendo a B&B di potare il resto.
+            staff_extra = [ev for ev in staff_evs_m if ev not in ev_list]
+            ev_full = staff_extra + ev_list if staff_extra else ev_list
             dbl_full = dbl
 
             # Check numero eventi validi
             for n_ev in range(min_ev, min(n_sel, len(ev_full)) + 1):
+                if deadline is not None and time.time() > deadline:
+                    break
                 n_d = n_sel - n_ev
                 if n_d > max_d: continue
-                # Genera tutte le combinazioni eventi possibili
+                # Genera tutte le combinazioni eventi possibili.
+                # Con staffetta: salta i sottoinsiemi che non la includono (già
+                # coperti dall'iterazione senza staffetta).
                 for ev_sub in combinations(ev_full, n_ev):
+                    if deadline is not None and time.time() > deadline:
+                        break
+                    if staff_evs_m and not staff_evs_m.issubset(ev_sub):
+                        continue
                     if sum(CdsUtils.is_lancio(e) for e in ev_sub) < min_lanci: continue
                     if sum(CdsUtils.is_salto(e) for e in ev_sub) < min_salti:  continue
-                    
+
                     dc = [e for e in ev_sub if e in dbl_full]
                     if len(dc) < n_d: continue
-                    
+
+                    # ── Outer upper-bound pruning (greedy con vincolo atleta) ──
+                    # Assegna greedily i migliori risultati disponibili rispettando
+                    # il vincolo "ogni atleta max 2 apparizioni totali".
+                    # Questo bound è molto più stretto di quello senza vincoli e pota
+                    # la grande maggioranza dei ev_sub che non possono battere best_total.
+                    staff_in_sub = [r for r in incl if r.get('ev') in set(ev_sub)]
+                    n_ind = n_sel - len(staff_in_sub)
+                    staff_ub = sum(r.get('pts', 0) for r in staff_in_sub)
+                    # Conta gli atleti già usati nella staffetta (base immutabile)
+                    ac_staff_base = {}
+                    for st in staff_in_sub:
+                        for k in CdsUtils.staff_athlete_keys(st.get('rawStaff', '')):
+                            ac_staff_base[k] = ac_staff_base.get(k, 0) + 1
+                    # Tutti i candidati individuali (top-n_sel per evento) ordinati per pts desc.
+                    # top-n_sel (non top-2) per evitare false potature quando i top-2 sono
+                    # esauriti per vincolo atleta e l'ottimale usa il 3°/4°/... candidato.
+                    staff_evs_sub = {s.get('ev') for s in staff_in_sub}
+                    cands_ub = sorted(
+                        (r for ev in ev_sub if ev not in staff_evs_sub
+                         for r in by_ev.get(ev, [])[:n_sel]),
+                        key=lambda r: r.get('pts', 0) or 0, reverse=True
+                    )
+                    # Outer bound: ogni evento può contribuire fino a 2 slot
+                    ac_ub = dict(ac_staff_base)
+                    ub_pts = staff_ub
+                    n_filled = 0
+                    seen_ub = set()
+                    for r in cands_ub:
+                        if n_filled >= n_ind:
+                            break
+                        rid = id(r)
+                        if rid in seen_ub:
+                            continue
+                        ak = CdsUtils.athlete_key(r.get('athlete', ''))
+                        if ac_ub.get(ak, 0) >= 2:
+                            continue
+                        ub_pts += r.get('pts', 0) or 0
+                        ac_ub[ak] = ac_ub.get(ak, 0) + 1
+                        seen_ub.add(rid)
+                        n_filled += 1
+                    if ub_pts <= best_total:
+                        continue
+                    # ──────────────────────────────────────────────────────────
+
                     for de in combinations(dc, n_d):
-                        sel, total = cls.opt_assign_best(by_ev, ev_sub, set(de), incl, n_sel, max_athl_ind)
+                        # ── De-specific bound (più stretto dell'outer bound) ──
+                        # Usa esattamente i slot previsti da de (2 se in de, 1 altrimenti).
+                        # Parte da ac_staff_base (solo staffetta), non da ac_ub modificato.
+                        de_set = set(de)
+                        ev_slots = {ev: (2 if ev in de_set else 1)
+                                    for ev in ev_sub if ev not in staff_evs_sub}
+                        ub_de = staff_ub
+                        ac_de = dict(ac_staff_base)
+                        n_de_filled = 0
+                        seen_de = set()
+                        for r in cands_ub:
+                            if n_de_filled >= n_ind:
+                                break
+                            rid = id(r)
+                            if rid in seen_de:
+                                continue
+                            ev_r = r.get('ev', '')
+                            if ev_slots.get(ev_r, 0) <= 0:
+                                continue
+                            ak = CdsUtils.athlete_key(r.get('athlete', ''))
+                            if ac_de.get(ak, 0) >= 2:
+                                continue
+                            ub_de += r.get('pts', 0) or 0
+                            ac_de[ak] = ac_de.get(ak, 0) + 1
+                            ev_slots[ev_r] -= 1
+                            seen_de.add(rid)
+                            n_de_filled += 1
+                        if ub_de <= best_total:
+                            continue
+                        # ─────────────────────────────────────────────────────
+                        sel, total = cls.opt_assign_best(by_ev, ev_sub, de_set, incl, n_sel, max_athl_ind, deadline)
                         if sel and total > best_total:
                             best_total, best_sel = total, sel
 

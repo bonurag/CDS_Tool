@@ -314,6 +314,7 @@ def _soc_meta(results, cat=None):
 # Le funzioni di calcolo, constraint e ottimizzazione sono state modularizzate
 # e si trovano ora nelle classi CdsUtils (cds_utils.py) e CdsOptimizer (cds_optimizer.py)
 
+@app.route('/api/proiezione')
 def api_proiezione():
     anno  = request.args.get('anno',  '2026')
     tipo  = request.args.get('tipo_attivita', 'P')
@@ -374,6 +375,10 @@ def api_ottimizza():
 @app.route('/')
 def index():
     return Response(FRONTEND_HTML, mimetype='text/html')
+
+@app.route('/.well-known/appspecific/com.chrome.devtools.json')
+def chrome_devtools():
+    return jsonify({})
 
 # ── MANUAL ENTRIES PERSISTENCE ────────────────────────────────────────────────
 
@@ -533,6 +538,20 @@ def _match_manual_to_soc(manual_entries, soc_cod, soc_nome, soc_results):
         matched.append(entry)
     return matched
 
+def _opt_keepalive(results_full, cat):
+    """Generatore: avvia l'ottimizzatore in un thread, emette ': keep\\n\\n' ogni 5s
+    mentre aspetta, poi restituisce il risultato come valore del generatore."""
+    import threading
+    result_box = [None]
+    done = threading.Event()
+    def _worker():
+        result_box[0] = CdsOptimizer.compute_optimal(results_full, cat)
+        done.set()
+    threading.Thread(target=_worker, daemon=True).start()
+    while not done.wait(5.0):
+        yield ': keep\n\n'
+    return result_box[0]
+
 @app.route('/api/proiezione/build')
 def api_proiezione_build():
     anno  = request.args.get('anno',  '2026')
@@ -547,7 +566,22 @@ def api_proiezione_build():
         return f'data: {json.dumps(d, ensure_ascii=False)}\n\n'
 
     def generate():
+        log_dir = os.path.join(_data_dir(), 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        log_name = f'build_log_{anno}_{tipo}_{sesso}_{cat}_{reg}_{time.strftime("%Y%m%d_%H%M%S")}.txt'
+        log_path = os.path.join(log_dir, log_name)
+        log = open(log_path, 'w', encoding='utf-8')
+        def _log(line=''):
+            log.write(line + '\n')
+            log.flush()
+
         try:
+            _log(f'=== Build proiezione CdS ===')
+            _log(f'Anno: {anno}  Tipo: {tipo}  Sesso: {sesso}  Categoria: {cat}  Regione: {reg}')
+            _log(f'Nazionalità: {naz}  Vento: {vento}')
+            _log(f'Avviato: {time.strftime("%Y-%m-%d %H:%M:%S")}')
+            _log()
+
             # Carica manual entries per questa categoria
             manual_entries = _read_manual().get(cat, [])
 
@@ -571,8 +605,11 @@ def api_proiezione_build():
             yield _ev({'type': 'status', 'msg': 'Caricamento lista società…'})
             societies = _fetch_society_list(reg)
             if not societies:
+                _log(f'ERRORE: nessuna società trovata per {reg}')
                 yield _ev({'type': 'error', 'msg': f'Nessuna società trovata per {reg}'}); return
             total = len(societies)
+            _log(f'Società trovate: {total}')
+            _log()
             yield _ev({'type': 'total', 'n': total})
 
             all_results, new_societies_meta = [], {}
@@ -620,7 +657,7 @@ def api_proiezione_build():
                                 # Manual entries cambiati o optimal mancante:
                                 # ricalcola con dati FIDAL cached + manual (senza re-fetch FIDAL)
                                 results_full = cached_results + soc_manual
-                                opt = CdsOptimizer.compute_optimal(results_full, cat)
+                                opt = yield from _opt_keepalive(results_full, cat)
                                 meta_upd = dict(old_meta)
                                 meta_upd['manual_count'] = new_manual_count
                                 meta_upd['data'] = results_full
@@ -630,6 +667,7 @@ def api_proiezione_build():
                             else:
                                 new_societies_meta[soc['cod']] = old_meta
 
+                            _log(f'[{i+1:3}/{total}] = {soc["nome"]} — invariata ({new_meta["num_gare"]} gare · Σ {new_meta["total_pts"]}pt)')
                             yield _ev({'type': 'unchanged', 'soc': soc['nome'],
                                        'num_gare': new_meta['num_gare'],
                                        'total_pts': new_meta['total_pts'],
@@ -656,7 +694,7 @@ def api_proiezione_build():
                                 meta_entry['data'] = results_full
                                 meta_entry['manual_count'] = len(soc_manual)
                                 # Calcola scheda ottimale con dati FIDAL + manuali
-                                opt = CdsOptimizer.compute_optimal(results_full, cat)
+                                opt = yield from _opt_keepalive(results_full, cat)
                                 if opt:
                                     meta_entry['optimal'] = opt
                             new_societies_meta[soc['cod']] = meta_entry
@@ -669,6 +707,9 @@ def api_proiezione_build():
                             n_sa = sum(1 for ev in ev_set if any(k in ev.lower() for k in _salti))
                             can_compete = n_ev >= 10 and n_la >= 2 and n_sa >= 2
                             opt_score = meta_entry.get('optimal', {}).get('score', -1)
+                            compete_tag = '🏆' if can_compete else '⚠'
+                            opt_str = f' · ottimale Σ {opt_score}' if (can_compete and opt_score > 0) else ''
+                            _log(f'[{i+1:3}/{total}] {compete_tag} {soc["nome"]} — {n_athl} atleti · {n_ev} gare ({n_la} lanci, {n_sa} salti) · Σ {new_meta["total_pts"]}pt{opt_str}')
                             yield _ev({'type': 'found', 'soc': soc['nome'],
                                        'n': len(results), 'n_athl': n_athl,
                                        'n_ev': n_ev, 'n_la': n_la, 'n_sa': n_sa,
@@ -679,10 +720,20 @@ def api_proiezione_build():
                                        'done': i+1, 'total': total,
                                        'found': found_soc, 'unchanged': unchanged_soc})
                     else:
+                        _log(f'[{i+1:3}/{total}] - {soc["nome"]} — nessun risultato')
                         yield _ev({'type': 'skip', 'soc': soc['nome'],
                                    'done': i+1, 'total': total,
                                    'found': found_soc, 'unchanged': unchanged_soc})
-                except Exception:
+                except ValueError as exc:
+                    if 'Nessun risultato' in str(exc):
+                        _log(f'[{i+1:3}/{total}] - {soc["nome"]} — nessun atleta {cat}')
+                    else:
+                        _log(f'[{i+1:3}/{total}] ERRORE {soc["nome"]} — {exc}')
+                    yield _ev({'type': 'skip', 'soc': soc['nome'],
+                               'done': i+1, 'total': total,
+                               'found': found_soc, 'unchanged': unchanged_soc})
+                except Exception as exc:
+                    _log(f'[{i+1:3}/{total}] ERRORE {soc["nome"]} — {exc}')
                     yield _ev({'type': 'skip', 'soc': soc['nome'],
                                'done': i+1, 'total': total,
                                'found': found_soc, 'unchanged': unchanged_soc})
@@ -694,14 +745,22 @@ def api_proiezione_build():
                     json.dump({'data': all_results, 'updated_at': updated_at,
                                'societies_meta': new_societies_meta},
                               f, ensure_ascii=False, indent=2)
+                _log()
+                _log(f'=== Completato: {updated_at} ===')
+                _log(f'Società aggiornate: {found_soc}  invariate: {unchanged_soc}  totale prestazioni: {len(all_results)}')
+                _log(f'Log salvato in: {log_path}')
                 yield _ev({'type': 'done', 'n_results': len(all_results),
                            'found_societies': found_soc, 'unchanged_societies': unchanged_soc,
-                           'updated_at': updated_at})
+                           'updated_at': updated_at, 'log_path': log_path})
             else:
+                _log(f'ERRORE: nessun risultato {cat} trovato nella regione {reg}')
                 yield _ev({'type': 'error',
                            'msg': f'Nessun risultato {cat} trovato nella regione {reg}'})
         except Exception as e:
+            _log(f'ERRORE FATALE: {e}')
             yield _ev({'type': 'error', 'msg': str(e)})
+        finally:
+            log.close()
 
     return Response(
         stream_with_context(generate()),
@@ -1774,7 +1833,8 @@ function startBuildProiezione(){
       const fmt = d.toLocaleString('it-IT',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
       const unch = msg.unchanged_societies || 0;
       status.textContent = `✅ Completato — ${msg.found_societies} aggiornate · ${unch} invariate (🏆 ${_buildCompete} competitive) · ${msg.n_results} prestazioni · ${fmt}`;
-      log.innerHTML += `<div style="font-weight:600;color:var(--green)">Dati salvati in cache. Avvio proiezione...</div>`;
+      const logFile = msg.log_path ? `<br><span style="font-size:.8em;color:var(--muted)">📄 Log: ${msg.log_path}</span>` : '';
+      log.innerHTML += `<div style="font-weight:600;color:var(--green)">Dati salvati in cache. Avvio proiezione...${logFile}</div>`;
       log.scrollTop = log.scrollHeight;
       setTimeout(() => {
         area.style.display = 'none';
