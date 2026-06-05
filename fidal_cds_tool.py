@@ -9,6 +9,8 @@ import requests
 from bs4 import BeautifulSoup
 import re, sys, threading, time, webbrowser, json, os
 from itertools import combinations
+from core.cds_utils import CdsUtils
+from core.cds_optimizer import CdsOptimizer
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -20,7 +22,7 @@ app = Flask(__name__)
 def _load_tabella(filename):
     # In modalità PyInstaller i dati vengono estratti in sys._MEIPASS
     base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(base, filename)
+    path = os.path.join(base, 'data', filename)
     if not os.path.exists(path):
         return {}
     with open(path, encoding='utf-8') as f:
@@ -236,6 +238,7 @@ def _do_fidal_fetch(p):
         raise ValueError(f'Nessun risultato trovato. '
                          f'(HTML: {len(r.text)} byte, snippet: {snippet[:120]}…)')
     categoria = fp.get('categoria', '')
+    _normalize_events(data, categoria)
     for row in data:
         pts, found = _lookup_pts(row['ev'], row['perf'], categoria)
         row['pts']    = pts
@@ -276,7 +279,7 @@ def _soc_meta(results, cat=None):
     """Statistiche aggregate per una società: totale punti, breakdown per tipo, eleggibilità."""
     _lanci_kw = {'peso','martello','giavellotto','disco','lancio','vortex','palla'}
     _salti_kw = {'lungo','triplo','alto','asta','salto'}
-    cds_prog = _CDS_PROGRAMS.get(cat) if cat else None
+    cds_prog = CdsUtils.get_cds_program(cat) if cat else None
     if cds_prog:
         results = [r for r in results if cds_prog(r.get('ev', ''))]
     evs = {r['ev'] for r in results}
@@ -307,192 +310,10 @@ def _soc_meta(results, cat=None):
 
 # ── OTTIMIZZATORE PYTHON (per build server-side) ─────────────────────────────
 
-_CAT_CONSTRAINTS = {
-    'CF': {'nSel':13,'minEv':10,'minLanci':2,'minSalti':2,'maxAthlInd':2,'maxD':3},
-    'CM': {'nSel':13,'minEv':10,'minLanci':2,'minSalti':2,'maxAthlInd':2,'maxD':3},
-    'RF': {'nSel':8, 'minEv':6, 'minLanci':1,'minSalti':1,'maxAthlInd':1,'maxD':2},
-    'RM': {'nSel':8, 'minEv':6, 'minLanci':1,'minSalti':1,'maxAthlInd':1,'maxD':2},
-}
-_OPT_LANCI = {'peso','martello','giavellotto','disco','lancio','vortex','palla'}
-_OPT_SALTI = {'lungo','triplo','alto','asta','salto'}
 
-def _opt_is_lancio(ev): return any(k in ev.lower() for k in _OPT_LANCI)
-def _opt_is_salto(ev):  return any(k in ev.lower() for k in _OPT_SALTI)
+# Le funzioni di calcolo, constraint e ottimizzazione sono state modularizzate
+# e si trovano ora nelle classi CdsUtils (cds_utils.py) e CdsOptimizer (cds_optimizer.py)
 
-def _opt_is_ostac(e):
-    return 'ostac' in e or ' hs' in e or 'hs ' in e or e.startswith('hs')
-
-# Programmi tecnici CdS (specchio di CDS_PROGRAMS nel JS)
-def _cds_program_cf(ev):
-    e = ev.lower()
-    return (('80' in e and ('piani' in e or _opt_is_ostac(e))) or
-            ('300' in e and (_opt_is_ostac(e) or 'piani' in e)) or
-            (bool(re.search(r'(?<!\d)1000(?!\d)', e)) and '3x' not in e and '3 x' not in e) or
-            '2000' in e or '1200' in e or
-            'asta' in e or 'in alto' in e or 'in lungo' in e or 'triplo' in e or
-            'peso' in e or 'martello' in e or 'disco' in e or 'giavellott' in e or
-            (re.search(r'4\s*[xX]\s*100(?!0)', ev) and 'staffetta' in e) or
-            'marcia' in e)
-
-def _cds_program_cm(ev):
-    e = ev.lower()
-    return (('80' in e and 'piani' in e) or
-            (bool(re.search(r'(?<!\d)100(?!\d)', e)) and _opt_is_ostac(e)) or
-            ('300' in e and (_opt_is_ostac(e) or 'piani' in e)) or
-            (bool(re.search(r'(?<!\d)1000(?!\d)', e)) and '3x' not in e and '3 x' not in e) or
-            '2000' in e or '1200' in e or
-            'asta' in e or 'in alto' in e or 'in lungo' in e or 'triplo' in e or
-            ('peso' in e and '4' in e) or
-            'martello' in e or 'disco' in e or 'giavellott' in e or
-            (re.search(r'4\s*[xX]\s*100(?!0)', ev) and 'staffetta' in e) or
-            'marcia' in e)
-
-def _cds_program_rm(ev):
-    e = ev.lower()
-    return ((bool(re.search(r'(?<!\d)60(?!\d)', e)) and ('piani' in e or _opt_is_ostac(e))) or
-            (bool(re.search(r'(?<!\d)1000(?!\d)', e)) and '3x' not in e and '3 x' not in e) or
-            'marcia' in e or 'in alto' in e or 'in lungo' in e or
-            ('peso' in e and '2' in e) or 'vortex' in e or
-            (re.search(r'4\s*[xX]\s*100(?!0)', ev) and 'staffetta' in e))
-
-_CDS_PROGRAMS = {
-    'CF': _cds_program_cf,
-    'CM': _cds_program_cm,
-    'RF': _cds_program_rm,   # stesso programma tecnico dei Ragazzi
-    'RM': _cds_program_rm,
-}
-
-def _athlete_key(name):
-    """Usa il cognome (prima parola) come chiave uniforme per il tracking atleti."""
-    return name.split()[0].upper() if name else ''
-
-def _staff_athlete_keys(raw_staff):
-    """Estrae i cognomi delle atlete da rawStaff ('LORINI A. CF,...')."""
-    keys = []
-    for part in re.split(r'[,/]', raw_staff or ''):
-        cleaned = re.sub(r'\s+[A-Z]{2}\s*$', '', part.strip()).strip()
-        k = _athlete_key(cleaned)
-        if k:
-            keys.append(k)
-    return keys
-
-def _opt_assign_best(by_ev, ev_sub, dbl_set, incl_staff, n_sel, max_athl_ind):
-    """Greedy assignment per un sottoinsieme di eventi."""
-    ev_cap = {ev: (2 if ev in dbl_set else 1) for ev in ev_sub}
-    staff_evs = {r['ev'] for r in incl_staff}
-    cands = []
-    for ev in ev_sub:
-        if ev not in staff_evs:
-            cands.extend(by_ev.get(ev, []))
-    cands.sort(key=lambda r: r.get('pts') or 0, reverse=True)
-
-    sel, ac_total, ac_ind, ev_used = [], {}, {}, {}
-    for st in incl_staff:
-        if st['ev'] in ev_sub:
-            sel.append(st)
-            ev_used[st['ev']] = ev_used.get(st['ev'], 0) + 1
-            # Prenota le atlete della staffetta (max 2 totali per atleta)
-            for k in _staff_athlete_keys(st.get('rawStaff', '')):
-                ac_total[k] = ac_total.get(k, 0) + 1
-
-    for r in cands:
-        ev = r['ev']
-        a  = r.get('athlete', '')
-        ak = _athlete_key(a)
-        if ev_used.get(ev, 0) >= ev_cap.get(ev, 1): continue
-        if ac_total.get(ak, 0) >= 2:                continue
-        if ac_ind.get(ak, 0) >= max_athl_ind:        continue
-        sel.append(r)
-        ac_total[ak] = ac_total.get(ak, 0) + 1
-        ac_ind[ak]   = ac_ind.get(ak, 0) + 1
-        ev_used[ev]  = ev_used.get(ev, 0) + 1
-
-    if len(sel) != n_sel: return None, -1
-    sel_evs = {r['ev'] for r in sel}
-    if not all(ev in sel_evs for ev in ev_sub): return None, -1
-    return sel, sum(r.get('pts') or 0 for r in sel)
-
-def _compute_optimal_py(results, cat):
-    """
-    Calcola la scheda ottimale per una società.
-    Restituisce {'score': int, 'sel': [lista risultati selezionati]} o None.
-    """
-    C = _CAT_CONSTRAINTS.get(cat, _CAT_CONSTRAINTS['CF'])
-    n_sel, min_ev = C['nSel'], C['minEv']
-    min_lanci, min_salti = C['minLanci'], C['minSalti']
-    max_athl_ind, max_d = C['maxAthlInd'], C['maxD']
-
-    cds_prog = _CDS_PROGRAMS.get(cat)
-    def _in_cds(r):
-        return not cds_prog or cds_prog(r.get('ev', ''))
-
-    ind   = [r for r in results if not r.get('isStaffetta') and r.get('pts_ok') and _in_cds(r)]
-    staff = [r for r in results if r.get('isStaffetta')     and r.get('pts_ok') and _in_cds(r)]
-    if not ind: return None
-
-    # Raggruppa individuale per evento, top-25 max
-    by_ev = {}
-    for r in ind:
-        by_ev.setdefault(r['ev'], []).append(r)
-    for ev in by_ev:
-        by_ev[ev].sort(key=lambda r: r.get('pts') or 0, reverse=True)
-        by_ev[ev] = by_ev[ev][:25]
-
-    ev_list = list(by_ev.keys())
-    dbl = [ev for ev in ev_list if len(by_ev[ev]) >= 2]
-
-    # Raggruppa staffette CdS (4x100) per tipo, tieni tutte le entry ordinate per punti
-    staff_by_ev = {}
-    for r in staff:
-        if re.search(r'4\s*[xX]\s*100(?!0)', r['ev']):
-            staff_by_ev.setdefault(r['ev'], []).append(r)
-    for ev in staff_by_ev:
-        staff_by_ev[ev].sort(key=lambda r: r.get('pts') or 0, reverse=True)
-    staff_groups = list(staff_by_ev.values())
-
-    def _staff_combos(groups):
-        """Prodotto cartesiano: per ogni tipo scegli None (escludi) o una delle entry."""
-        if not groups:
-            yield []
-            return
-        first, *rest = groups
-        for tail in _staff_combos(rest):
-            yield [None] + tail
-            for entry in first:
-                yield [entry] + tail
-
-    best_total, best_sel = -1, None
-
-    for combo in _staff_combos(staff_groups):
-        incl = [r for r in combo if r is not None]
-        staff_evs_m = {r['ev'] for r in incl}
-        ev_full = ev_list + [ev for ev in staff_evs_m if ev not in ev_list]
-        dbl_full = dbl  # staffette hanno 1 risultato, non sono in dbl
-
-        for n_ev in range(min_ev, min(n_sel, len(ev_full)) + 1):
-            n_d = n_sel - n_ev
-            if n_d > max_d: continue
-            for ev_sub in combinations(ev_full, n_ev):
-                if sum(_opt_is_lancio(e) for e in ev_sub) < min_lanci: continue
-                if sum(_opt_is_salto(e) for e in ev_sub) < min_salti:  continue
-                dc = [e for e in ev_sub if e in dbl_full]
-                if len(dc) < n_d: continue
-                for de in combinations(dc, n_d):
-                    sel, total = _opt_assign_best(by_ev, ev_sub, set(de), incl, n_sel, max_athl_ind)
-                    if sel and total > best_total:
-                        best_total, best_sel = total, sel
-
-    if best_sel is None: return None
-    return {
-        'score': best_total,
-        'ids': [r.get('id') for r in best_sel],
-        'sel': [{'id': r.get('id'), 'ev': r['ev'], 'athlete': r.get('athlete',''),
-                 'pts': r.get('pts', 0), 'perf': r.get('perf',''),
-                 'isStaffetta': r.get('isStaffetta', False)} for r in best_sel],
-        'updated_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
-    }
-
-@app.route('/api/proiezione')
 def api_proiezione():
     anno  = request.args.get('anno',  '2026')
     tipo  = request.args.get('tipo_attivita', 'P')
@@ -533,6 +354,22 @@ def api_proiezione():
                         'data': data, 'updated_at': updated_at})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/api/ottimizza', methods=['POST'])
+def api_ottimizza():
+    from core.cds_optimizer import CdsOptimizer
+    try:
+        payload = request.get_json()
+        results = payload.get('data', [])
+        cat = payload.get('categoria', 'CF')
+        
+        opt = CdsOptimizer.compute_optimal(results, cat)
+        return jsonify({'ok': True, 'optimal': opt})
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
 
 @app.route('/')
 def index():
@@ -722,6 +559,7 @@ def api_proiezione_build():
                 try:
                     with open(cache_path, encoding='utf-8') as f:
                         old_cache = json.load(f)
+                    _normalize_events(old_cache.get('data', []), cat)
                     cached_meta = old_cache.get('societies_meta', {})
                     for r in old_cache.get('data', []):
                         cod = r.get('soc_cod')
@@ -772,6 +610,7 @@ def api_proiezione_build():
                             # Anche per le società invariate: verifica e integra manual entries
                             soc_manual = _match_manual_to_soc(
                                 manual_entries, soc['cod'], soc['nome'], cached_results)
+                            _normalize_events(soc_manual, cat)
                             new_manual_count = len(soc_manual)
                             old_manual_count = old_meta.get('manual_count', 0)
 
@@ -781,7 +620,7 @@ def api_proiezione_build():
                                 # Manual entries cambiati o optimal mancante:
                                 # ricalcola con dati FIDAL cached + manual (senza re-fetch FIDAL)
                                 results_full = cached_results + soc_manual
-                                opt = _compute_optimal_py(results_full, cat)
+                                opt = CdsOptimizer.compute_optimal(results_full, cat)
                                 meta_upd = dict(old_meta)
                                 meta_upd['manual_count'] = new_manual_count
                                 meta_upd['data'] = results_full
@@ -806,6 +645,7 @@ def api_proiezione_build():
                             # Abbina manual entries a questa società
                             soc_manual = _match_manual_to_soc(
                                 manual_entries, soc['cod'], soc['nome'], results)
+                            _normalize_events(soc_manual, cat)
                             results_full = results + soc_manual  # dati FIDAL + manuali
 
                             meta_entry = {
@@ -816,7 +656,7 @@ def api_proiezione_build():
                                 meta_entry['data'] = results_full
                                 meta_entry['manual_count'] = len(soc_manual)
                                 # Calcola scheda ottimale con dati FIDAL + manuali
-                                opt = _compute_optimal_py(results_full, cat)
+                                opt = CdsOptimizer.compute_optimal(results_full, cat)
                                 if opt:
                                     meta_entry['optimal'] = opt
                             new_societies_meta[soc['cod']] = meta_entry
@@ -2963,127 +2803,58 @@ async function computeOptimal(){
   const _lbar  = document.getElementById('loading-bar-track');
   const _lfill = document.getElementById('loading-bar-fill');
   const _lsub  = document.getElementById('loading-sub');
-  const _llog  = document.getElementById('opt-log');
-
-  // Mostra overlay con barra determinata
-  _setLoadingMsg('Calcolo punteggio ottimale…');
+  
+  _setLoadingMsg('Analisi algoritmica server-side DFS Branch&Bound in corso…');
   if (_lbar)  _lbar.style.display = '';
-  if (_lfill) { _lfill.classList.remove('indeterminate'); _lfill.style.width = '0%'; }
-  if (_llog)  { _llog.style.display = ''; _llog.innerHTML = ''; }
+  if (_lfill) { _lfill.classList.remove('indeterminate'); _lfill.classList.add('indeterminate'); _lfill.style.width = '100%'; }
   document.getElementById('loading').classList.remove('hidden');
-  await new Promise(r => setTimeout(r, 30)); // lascia al browser il tempo di renderizzare
-
-  const _startTs = Date.now();
-  function _elapsed(){ return ((Date.now()-_startTs)/1000).toFixed(1)+'s'; }
-
-  function setProgress(pct, stepMsg){
-    if (_lfill) _lfill.style.width = Math.min(100, Math.round(pct)) + '%';
-    _setLoadingMsg(`Calcolo punteggio ottimale… ${Math.round(pct)}%  ⏱ ${_elapsed()}`);
-    if (_lsub) _lsub.textContent = stepMsg;
-    if (_llog && stepMsg) {
-      _llog.innerHTML += `<div>[${_elapsed()}] ${stepMsg}</div>`;
-      _llog.scrollTop = _llog.scrollHeight;
-    }
-  }
-
-  let _savedALL = null; // riservato per usi futuri
 
   try {
-    // Raggruppa staffette CdS per tipo, tieni tutte le entry ordinate per punti.
-    // Il prodotto cartesiano (nessuna | una qualsiasi entry per tipo) garantisce che
-    // anche staffette con atlete diverse vengano valutate rispetto alle gare individuali.
-    const _cdsProg=CDS_PROGRAMS[currentCategoria];
-    const _rawStaff=activeAll().filter(r=>r.isStaffetta&&(!_cdsProg||_cdsProg(r.ev)));
-    const _byEvType={};
-    for (const r of _rawStaff){
-      (_byEvType[r.ev]=_byEvType[r.ev]||[]).push(r);
-    }
-    for (const ev of Object.keys(_byEvType)){
-      _byEvType[ev].sort((a,b)=>pts(b)-pts(a));
-    }
-    const staffGroups=Object.values(_byEvType); // [[r1a,r1b,...],[r2a,...],...]
-    const n=staffGroups.length;
-    const evList=[...new Set(activeAll().filter(r=>!r.isStaffetta).map(r=>r.ev))];
-    const C=getC();
-    const maxD = isProiezione ? 1 : C.nSel-C.minEv;
-    const nEvs=evList.length;
-    const totalCombos=staffGroups.reduce((acc,g)=>acc*(1+g.length),1);
-    const totalSteps = totalCombos + 2*n + 1;
-    let doneSteps = 0;
-
-    // Stima combinazioni per info
-    let estCombs=0;
-    for(let nEv=C.minEv;nEv<=Math.min(C.nSel,nEvs);nEv++){
-      const nD=C.nSel-nEv; if(nD>maxD) continue;
-      let c=1; for(let i=0;i<Math.min(nEv,nEvs-nEv);i++) c=c*(nEvs-i)/(i+1);
-      estCombs+=Math.round(c);
-    }
-    console.log(`[Optimizer] ALL=${ALL.length} risultati · ${nEvs} gare individuali · staffette CdS: [${staffGroups.map(g=>g[0].ev).join(', ')||'nessuna'}] (${totalCombos} conf. staffette) · ~${estCombs.toLocaleString('it')} combinazioni gare · maxD=${maxD}`);
-    setProgress(0, `Inizio · ${nEvs} gare · ~${estCombs.toLocaleString('it')} combinazioni · ${totalCombos} conf. staffette`);
-    await new Promise(r => setTimeout(r, 0));
-
-    let bestTotal=-1,bestSel=null;
-    staffAnalysis=[];
-    topCombinations=[];
-
-    // Fase 1 — prodotto cartesiano staffette (nessuna | una entry per tipo)
-    let comboIdx=0;
-    for (const combo of _staffCombos(staffGroups)){
-      const incl=combo.filter(Boolean);
-      const staffLabel = incl.length ? incl.map(r=>r.ev).join(' + ') : 'nessuna staffetta';
-      setProgress(doneSteps/totalSteps*100,
-        `Conf. staffette ${comboIdx+1}/${totalCombos}: ${staffLabel}${bestTotal>0?' · miglior Σ '+bestTotal:''}…`);
-      await new Promise(r => setTimeout(r, 0));
-      const {total,sel}=searchOptimal(incl, maxD);
-      if (sel&&sel.length===C.nSel){
-        topCombinations.push({total,sel:[...sel],inclStaff:staffLabel});
-        if (total>bestTotal){
-          bestTotal=total;bestSel=sel;
-          console.log(`[Optimizer] Nuovo miglior score: ${total} (combo ${comboIdx}: ${staffLabel})`);
-        }
+      const active = activeAll();
+      const C=getC();
+      
+      const payload = {
+          categoria: currentCategoria,
+          data: active.map(r => {
+            const ret = {...r};
+            ret.pts = pts(r);
+            return ret;
+          })
+      };
+      
+      const resp = await fetch('/api/ottimizza', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+      });
+      
+      const res = await resp.json();
+      if (!res.ok) throw new Error(res.error);
+      
+      selectedIds.clear();
+      
+      if (!res.optimal || !res.optimal.sel || res.optimal.sel.length !== C.nSel){
+          setNoteEst(`⚠ Impossibile trovare ${C.nSel} risultati validi che incastrino tutti i vincoli.`, true);
+      } else {
+          setNoteEst('');
+          staffAnalysis = []; 
+          res.optimal.sel.forEach(r => selectedIds.add(Number(r.id)));
       }
-      doneSteps++;
-      comboIdx++;
-    }
-    topCombinations.sort((a,b)=>b.total-a.total);
-
-    // Fase 2 — analisi per ogni tipo di staffetta: con (entry migliore) vs senza
-    for (const [si, staffOpts] of staffGroups.entries()){
-      const st=staffOpts[0];
-      setProgress(doneSteps/totalSteps*100,
-        `Analisi staffetta ${si+1}/${n}: ${st.ev}…`);
-      await new Promise(r => setTimeout(r, 0));
-      const {total:tC}=searchOptimal([st], maxD);
-      doneSteps++;
-      await new Promise(r => setTimeout(r, 0));
-      const {total:tS}=searchOptimal([], maxD);
-      doneSteps++;
-      const inOpt=bestSel?staffOpts.some(opt=>bestSel.some(r=>r.id===opt.id)):false;
-      staffAnalysis.push({staff:st,tCon:tC,tSenza:tS,delta:tC-tS,inOpt});
-    }
-
-    console.log(`[Optimizer] Completato. Miglior score: ${bestTotal}. Top combinazioni:`, topCombinations.slice(0,3).map(c=>({total:c.total,staff:c.inclStaff})));
-    setProgress(99, 'Rendering risultati…');
-    await new Promise(r => setTimeout(r, 0));
-
-    selectedIds.clear();
-    if (!bestSel){
-      setNoteEst(`⚠ Impossibile trovare ${C.nSel} risultati con ≥${C.minEv} gare e tutti i vincoli soddisfatti.`+buildOptDiagnostic(), true);
-    } else {
-      setNoteEst('');
-      bestSel.forEach(r=>selectedIds.add(r.id));
-    }
-    renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
-    renderStaffettaAnalysis();
+      
+      renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+      
+  } catch(e) {
+      alert("Errore calcolo ottimale: " + e.message);
   } finally {
-    document.getElementById('loading').classList.add('hidden');
-    _setLoadingMsg('Caricamento dati FIDAL…');
-    if (_lbar)  _lbar.style.display='none';
-    if (_lfill) { _lfill.classList.add('indeterminate'); _lfill.style.width='40%'; }
-    if (_lsub)  _lsub.textContent='';
-    if (_llog)  { _llog.style.display='none'; _llog.innerHTML=''; }
+      document.getElementById('loading').classList.add('hidden');
+      if (_lbar)  _lbar.style.display='none';
   }
 }
+
+// Funzioni Legacy rimosse
+function _staffCombos(groups) { return []; }
+function searchOptimal(inclStaff, maxDoubles) { return {sel:[], total:0}; }
+function assignBest(evSub, dblSet, inclStaff) { return {sel:[], total:0}; }
 
 // ── CLASSIFICA REGIONALE ──────────────────────────────────
 async function computeClassifica(){

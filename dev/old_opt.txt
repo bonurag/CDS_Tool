@@ -1,0 +1,36 @@
+def _opt_assign_best(by_ev, ev_sub, dbl_set, incl_staff, n_sel, max_athl_ind):
+    """Greedy assignment per un sottoinsieme di eventi."""
+    ev_cap = {ev: (2 if ev in dbl_set else 1) for ev in ev_sub}
+    staff_evs = {r['ev'] for r in incl_staff}
+    cands = []
+    for ev in ev_sub:
+        if ev not in staff_evs:
+            cands.extend(by_ev.get(ev, []))
+    cands.sort(key=lambda r: r.get('pts') or 0, reverse=True)
+
+    sel, ac_total, ac_ind, ev_used = [], {}, {}, {}
+    for st in incl_staff:
+        if st['ev'] in ev_sub:
+            sel.append(st)
+            ev_used[st['ev']] = ev_used.get(st['ev'], 0) + 1
+            # Prenota le atlete della staffetta (max 2 totali per atleta)
+            for k in _staff_athlete_keys(st.get('rawStaff', '')):
+                ac_total[k] = ac_total.get(k, 0) + 1
+
+    for r in cands:
+        ev = r['ev']
+        a  = r.get('athlete', '')
+        ak = _athlete_key(a)
+        if ev_used.get(ev, 0) >= ev_cap.get(ev, 1): continue
+        if ac_total.get(ak, 0) >= 2:                continue
+        if ac_ind.get(ak, 0) >= max_athl_ind:        continue
+        sel.append(r)
+        ac_total[ak] = ac_total.get(ak, 0) + 1
+        ac_ind[ak]   = ac_ind.get(ak, 0) + 1
+        ev_used[ev]  = ev_used.get(ev, 0) + 1
+
+    if len(sel) != n_sel: return None, -1
+    sel_evs = {r['ev'] for r in sel}
+    if not all(ev in sel_evs for ev in ev_sub): return None, -1
+    return sel, sum(r.get('pts') or 0 for r in sel)
+
