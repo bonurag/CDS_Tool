@@ -44,6 +44,8 @@ Per usare una porta diversa: `python fidal_cds_tool.py 8080`
 
 Clicca **⚡ Carica Graduatorie FIDAL** per scaricare i dati.
 
+Il pulsante **📂 Importa risultati da CSV (modalità manuale)** in fondo alla schermata consente di saltare il caricamento FIDAL e aprire direttamente il tool con i soli dati del file CSV. Vedere la sezione [Importazione da CSV](#importazione-da-csv).
+
 ---
 
 ### Schermata 2 — Prospetto CdS
@@ -95,9 +97,58 @@ Il pannello atleti mostra il contatore per ogni atleta nella selezione corrente.
 
 L'eventuale banner di errore dell'ottimizzatore si azzera automaticamente appena la selezione manuale soddisfa tutti i vincoli.
 
+#### 📂 Importa da CSV (dal tool screen)
+
+Il pulsante **📂 Importa da CSV** nella barra manuale aggiunge i record del file ai risultati FIDAL già caricati, senza resettare la sessione corrente. Utile per integrare risultati mancanti in blocco.
+
 #### ⬇ Stampa / PDF
 
 Genera una scheda stampabile in formato A4 con tutti i risultati selezionati, punteggi e totale. Si apre una nuova finestra — dal dialogo di stampa del browser scegliere **Salva come PDF**.
+
+---
+
+## Importazione da CSV
+
+Il tool supporta l'importazione massiva di risultati tramite file `.csv`. È disponibile da due punti:
+
+| Punto di accesso | Comportamento |
+| --- | --- |
+| **Schermata parametri** — pulsante *Importa risultati da CSV (modalità manuale)* | Salta il caricamento FIDAL; apre il tool con i soli dati del CSV usando i parametri del form (categoria, società, anno…) |
+| **Schermata tool** — pulsante *📂 Importa da CSV* nella barra manuale | Aggiunge i record del file ai risultati già caricati da FIDAL |
+
+### Formato file
+
+- Separatore: virgola (`,`)
+- Prima riga: intestazione con i nomi delle colonne (case-insensitive)
+- Valori contenenti virgole: racchiusi tra doppi apici
+- Encoding: UTF-8, UTF-8 con BOM o Latin-1
+
+### Colonne
+
+| Colonna | Obbligatoria | Valori ammessi |
+| --- | --- | --- |
+| `categoria` | **Sì** | `CF` · `CM` · `RF` · `RM` |
+| `gara` | **Sì** | Nome dalla lista discipline valide per la categoria (case-insensitive) |
+| `tipo` | **Sì** | `corsa` · `ostacoli` · `salto` · `lancio` · `staffetta` |
+| `prestazione` | **Sì** | Formato libero: secondi, `m:ss.cc`, metri (es. `42.10`, `1:52.30`, `13.45`) |
+| `atleta` | **Sì** | Nome atleta; per staffetta nomi separati da `/` o `,` |
+| `punti` | No | Intero ≥ 0; lasciare vuoto se sconosciuto |
+| `vento` | No | es. `+1.2`, `-0.5` |
+| `piazzamento` | No | Numero intero |
+| `citta` | No | Testo libero |
+| `data` | No | `gg/mm/aaaa` oppure `gg/mm` |
+
+La colonna `gara` viene validata contro la lista delle discipline presenti nelle tabelle punteggi per la categoria indicata. Nomi parzialmente errati o non riconosciuti causano il rifiuto della riga (con messaggio esplicito), senza bloccare le righe valide.
+
+Il pulsante **Scarica template CSV** nel modal produce un file di esempio precompilato con la struttura corretta.
+
+### Endpoint API correlati
+
+| Endpoint | Metodo | Descrizione |
+| --- | --- | --- |
+| `/api/manual/template_csv` | GET | Scarica il file template CSV |
+| `/api/manual/import_csv` | POST | Importa un file CSV (`multipart/form-data`, campo `file`) |
+| `/api/discipline_list` | GET | Restituisce `{CF:[…], CM:[…], RF:[…], RM:[…]}` con i nomi canonici delle discipline |
 
 ---
 
@@ -152,22 +203,25 @@ Lo script installa automaticamente le dipendenze e produce `dist\FIDAL_CDS_Tool.
 ## Struttura del progetto
 
 ```text
-C:\...\CDS_Tool ├── core\                   # Logica matematica
- │    ├── cds_optimizer.py   # Algoritmo DFS (Branch & Bound) per l'ottimizzazione dell'assegnazione atleti
- │    └── cds_utils.py       # Utilità, preset regolamentari per categorie, filtri e controlli
+C:\...\CDS_Tool
+ ├── core\                   # Logica di dominio
+ │    ├── cds_optimizer.py   # Algoritmo DFS Branch & Bound per l'ottimizzazione della scheda
+ │    ├── cds_utils.py       # Classificazione eventi, preset CdS, vincoli regolamentari
+ │    └── cds_manual.py      # Lettura/scrittura persistente di manual_entries.json
  │
- ├── data\                   # Database dei punteggi tabellari FIDAL (JSON)
- │    ├── Cadette.json       # (CF)
- │    ├── Cadetti.json       # (CM)
- │    ├── Ragazze.json       # (RF)
- │    └── Ragazzi.json       # (RM)
+ ├── data\                   # Tabelle punteggi FIDAL (JSON)
+ │    ├── Cadette.json       # CF — Cadette
+ │    ├── Cadetti.json       # CM — Cadetti
+ │    ├── Ragazze.json       # RF — Ragazze
+ │    └── Ragazzi.json       # RM — Ragazzi
  │
- ├── dev\                    # Script ausiliari usati in fase di sviluppo/sostituzione python
- ├── tests\                  # Test empirici di offline evaluation e chiamate server simulate
+ ├── dev\                    # Script ausiliari di sviluppo
+ ├── tests\                  # Test empirici e chiamate server simulate
  │
- ├── fidal_cds_tool.py       # Interfaccia UI e Server API Web App Flask
+ ├── fidal_cds_tool.py       # Server Flask + UI (HTML/CSS/JS inline)
+ ├── manual_entries.json     # Risultati manuali salvati (generato automaticamente)
  ├── fidal_cds_tool.spec     # Schema compilazione PyInstaller (.exe)
- └── build.bat               # Costruttore dell'eseguibile autonomo Windows
+ └── build.bat               # Builder eseguibile autonomo Windows
 ```
 
 ### Evoluzione algoritmica — Ottimizzatore v2 (DFS + Branch & Bound)

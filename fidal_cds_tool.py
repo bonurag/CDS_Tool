@@ -11,6 +11,7 @@ import re, sys, threading, time, webbrowser, json, os
 from itertools import combinations
 from core.cds_utils import CdsUtils
 from core.cds_optimizer import CdsOptimizer
+from core.cds_manual import read_manual, write_manual, MANUAL_FILE, _data_dir
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -364,30 +365,38 @@ def api_ottimizza():
         payload = request.get_json()
         results = list(payload.get('data', []))
         cat     = payload.get('categoria', 'CF')
-        soc_cod = payload.get('soc_cod', '')
-        soc_nome = payload.get('soc_nome', '')
 
-        # Normalizza i nomi evento (i dati FIDAL sono già normalizzati lato server,
-        # ma quelli manuali arrivano dal browser senza normalizzazione).
         _normalize_events(results, cat)
 
-        # Integra le manual entries salvate sul server per questa società,
-        # così vengono considerate anche se il browser non le ha ricaricate.
-        if soc_cod or soc_nome:
-            manual_all = _read_manual().get(cat, [])
-            existing_saved_ids = {r.get('savedId') for r in results if r.get('savedId')}
-            for entry in manual_all:
-                if entry.get('savedId') in existing_saved_ids:
-                    continue  # già presente nel payload
-                if soc_cod and entry.get('soc_cod') and entry.get('soc_cod') != soc_cod:
-                    continue
-                if not soc_cod and soc_nome and entry.get('soc_nome') and entry.get('soc_nome') != soc_nome:
-                    continue
-                results.append(entry)
-            _normalize_events(results, cat)
+        ind_results    = [r for r in results if not r.get('isStaffetta')]
+        staff_eligible = [r for r in results if r.get('isStaffetta') and r.get('pts_ok')]
 
-        opt = CdsOptimizer.compute_optimal(results, cat)
-        return jsonify({'ok': True, 'optimal': opt})
+        # Baseline (nessuna staffetta) — sempre calcolato per l'analisi UI
+        baseline = CdsOptimizer.compute_optimal(ind_results, cat)
+        baseline_score = baseline['score'] if baseline else 0
+
+        # Per ogni staffetta eleggibile: ottimale esatto con quella staffetta
+        staff_scores = {}
+        best_score = baseline_score
+        opt = baseline
+        for staff in staff_eligible:
+            opt_s = CdsOptimizer.compute_optimal(ind_results + [staff], cat)
+            if opt_s:
+                sid = str(staff.get('id', ''))
+                staff_scores[sid] = opt_s['score']
+                if opt_s['score'] > best_score:
+                    best_score = opt_s['score']
+                    opt = opt_s
+
+        if opt:
+            opt.pop('combo_scores', None)
+
+        return jsonify({
+            'ok': True,
+            'optimal': opt,
+            'baseline_score': baseline_score,
+            'staff_scores': staff_scores,
+        })
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -401,28 +410,30 @@ def index():
 def chrome_devtools():
     return jsonify({})
 
-# ── MANUAL ENTRIES PERSISTENCE ────────────────────────────────────────────────
-
-def _data_dir():
-    """Directory scrivibile anche in modalità PyInstaller (accanto all'exe)."""
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-MANUAL_FILE = os.path.join(_data_dir(), 'manual_entries.json')
-
-def _read_manual():
-    if not os.path.exists(MANUAL_FILE):
-        return {}
+@app.route('/api/fidal_status')
+def api_fidal_status():
+    """Verifica raggiungibilità server FIDAL. Chiamata dal frontend come health-check."""
+    import urllib.request, time
     try:
-        with open(MANUAL_FILE, encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {}
+        t0 = time.time()
+        req = urllib.request.Request(
+            'https://www.fidal.it/graduatorie.php',
+            method='HEAD',
+            headers={'User-Agent': 'Mozilla/5.0'}
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            latency_ms = int((time.time() - t0) * 1000)
+            return jsonify({'ok': True, 'latency_ms': latency_ms, 'http': resp.status})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)[:120]})
 
-def _write_manual(data):
-    with open(MANUAL_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+# ── MANUAL ENTRIES PERSISTENCE ────────────────────────────────────────────────
+# Funzioni e costante importate da core.cds_manual:
+#   read_manual(), write_manual(data), MANUAL_FILE
+
+# Alias privati per compatibilità con il codice esistente
+_read_manual  = read_manual
+_write_manual = write_manual
 
 @app.route('/api/manual', methods=['GET'])
 def api_manual_get():
@@ -457,6 +468,231 @@ def api_manual_delete(saved_id):
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)})
+
+
+_CSV_COLUMNS_REQUIRED = ['categoria', 'gara', 'tipo', 'prestazione', 'atleta']
+_CSV_COLUMNS_OPTIONAL = ['punti', 'vento', 'piazzamento', 'citta', 'data']
+_CSV_VALID_CATEGORIE = {'CF', 'CM', 'RF', 'RM'}
+_CSV_VALID_TIPI = {'corsa', 'ostacoli', 'salto', 'lancio', 'staffetta'}
+
+def _gare_valide(categoria):
+    """Restituisce la lista ordinata dei nomi canonici per la categoria."""
+    return sorted(_TABELLE.get(categoria, {}).keys())
+
+def _find_gara_canonica(gara_input, categoria):
+    """Match case-insensitive del nome gara; restituisce il nome canonico o None."""
+    needle = gara_input.strip().lower()
+    for nome in _TABELLE.get(categoria, {}):
+        if nome.lower() == needle:
+            return nome
+    return None
+
+_CSV_TEMPLATE_ROWS = [
+    ','.join(_CSV_COLUMNS_REQUIRED + _CSV_COLUMNS_OPTIONAL),
+    'CF,Staffetta 4 X 100,staffetta,56.42,"ROSSI L. / BIANCHI M. / VERDI G. / NERI A.",638,,1,Brescia,18/04/2026',
+    'CM,"Getto del peso Kg 4,000",lancio,13.45,FERRARI A.,720,,2,Milano,10/05/2026',
+    'CF,300 piani,corsa,42.10,CONTI B.,,,,Bergamo,15/05/2026',
+]
+
+@app.route('/api/discipline_list', methods=['GET'])
+def api_discipline_list():
+    return jsonify({cat: _gare_valide(cat) for cat in _CSV_VALID_CATEGORIE})
+
+@app.route('/api/manual/template_csv', methods=['GET'])
+def api_manual_template_csv():
+    content = '\r\n'.join(_CSV_TEMPLATE_ROWS) + '\r\n'
+    from flask import Response
+    return Response(
+        content,
+        mimetype='text/csv',
+        headers={'Content-Disposition': 'attachment; filename="template_importazione_cds.csv"'}
+    )
+
+@app.route('/api/manual/import_csv', methods=['POST'])
+def api_manual_import_csv():
+    import csv, io
+    try:
+        if 'file' not in request.files:
+            return jsonify({'ok': False, 'error': 'Nessun file ricevuto'})
+        f = request.files['file']
+        raw = f.read().decode('utf-8-sig')
+        reader = csv.DictReader(io.StringIO(raw))
+        fieldnames = [c.strip().lower() for c in (reader.fieldnames or [])]
+
+        missing_cols = [c for c in _CSV_COLUMNS_REQUIRED if c not in fieldnames]
+        if missing_cols:
+            return jsonify({'ok': False, 'error': f'Colonne obbligatorie mancanti: {", ".join(missing_cols)}'})
+
+        saved_data = _read_manual()
+        errors = []
+        imported = []
+
+        for row_idx, row in enumerate(reader, start=2):
+            row_norm = {k.strip().lower(): (v or '').strip() for k, v in row.items()}
+            row_errors = []
+
+            categoria = row_norm.get('categoria', '').upper()
+            gara      = row_norm.get('gara', '')
+            tipo      = row_norm.get('tipo', '').lower()
+            perf      = row_norm.get('prestazione', '')
+            atleta    = row_norm.get('atleta', '')
+            punti_raw = row_norm.get('punti', '')
+            vento     = row_norm.get('vento', '')
+            piazz     = row_norm.get('piazzamento', '')
+            citta     = row_norm.get('citta', '')
+            data_val  = row_norm.get('data', '')
+
+            if not categoria:
+                row_errors.append('categoria mancante')
+            elif categoria not in _CSV_VALID_CATEGORIE:
+                row_errors.append(f'categoria "{categoria}" non valida (ammessi: CF, CM, RF, RM)')
+
+            gara_canonica = None
+            if not gara:
+                row_errors.append('gara mancante')
+            elif categoria in _CSV_VALID_CATEGORIE:
+                gara_canonica = _find_gara_canonica(gara, categoria)
+                if gara_canonica is None:
+                    valide = ', '.join(_gare_valide(categoria))
+                    row_errors.append(
+                        f'gara "{gara}" non riconosciuta per {categoria}. '
+                        f'Valori ammessi: {valide}'
+                    )
+                else:
+                    gara = gara_canonica  # normalizza al nome canonico
+
+            if not tipo:
+                row_errors.append('tipo mancante')
+            elif tipo not in _CSV_VALID_TIPI:
+                row_errors.append(f'tipo "{tipo}" non valido (ammessi: {", ".join(sorted(_CSV_VALID_TIPI))})')
+
+            if not perf:
+                row_errors.append('prestazione mancante')
+
+            if not atleta:
+                row_errors.append('atleta mancante')
+
+            pts_num = 0
+            pts_ok  = False
+            if punti_raw:
+                try:
+                    pts_num = int(punti_raw)
+                    if pts_num < 0:
+                        row_errors.append('punti deve essere >= 0')
+                    else:
+                        pts_ok = True
+                except ValueError:
+                    row_errors.append(f'punti "{punti_raw}" non è un numero intero')
+
+            if row_errors:
+                errors.append({'riga': row_idx, 'errori': row_errors,
+                               'anteprima': f'{gara} / {atleta} / {perf}'})
+                continue
+
+            is_staff = (tipo == 'staffetta')
+            staff_list = [s.strip() for s in atleta.replace('/', ',').split(',') if s.strip()] if is_staff else None
+            athlete_display = (' / '.join(staff_list)) if is_staff else atleta
+
+            saved_id = f"{categoria}_{int(time.time()*1000)}_{row_idx}"
+            entry = {
+                'categoria': categoria,
+                'ev': gara,
+                'type': tipo,
+                'athlete': athlete_display,
+                'athlete_url': '',
+                'perf': perf,
+                'wind': vento,
+                'piazz': piazz,
+                'citta': citta,
+                'data': data_val,
+                'anno': '',
+                'pts': pts_num,
+                'pts_ok': pts_ok,
+                'isStaffetta': is_staff,
+                'rawStaff': atleta if is_staff else '',
+                'staffAthl': staff_list,
+                'isManual': True,
+                'soc_cod': '',
+                'soc_nome': '',
+                'savedId': saved_id,
+                'savedAt': time.strftime('%Y-%m-%dT%H:%M:%S'),
+            }
+            saved_data.setdefault(categoria, []).append(entry)
+            imported.append(entry)
+
+        if errors and not imported:
+            return jsonify({'ok': False, 'errors': errors, 'imported': []})
+
+        if imported:
+            _write_manual(saved_data)
+
+        return jsonify({'ok': True, 'imported': imported, 'errors': errors})
+
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/api/reoptimize_soc', methods=['POST'])
+def api_reoptimize_soc():
+    """Ricalcola l'ottimale per una singola società nel JSON della proiezione cached.
+    Chiamato in background quando un record manuale viene aggiunto o rimosso."""
+    try:
+        payload  = request.get_json(force=True)
+        soc_cod  = payload.get('soc_cod', '')
+        cat      = payload.get('categoria', '')
+        anno     = payload.get('anno', '2026')
+        tipo     = payload.get('tipo_attivita', 'P')
+        sesso    = payload.get('sesso', 'F')
+        reg      = payload.get('regione', 'LOM')
+
+        if not soc_cod or not cat:
+            return jsonify({'ok': False, 'error': 'soc_cod e categoria obbligatori'})
+
+        cache_path = _proiezione_cache_path(anno, tipo, sesso, cat, reg)
+        if not os.path.exists(cache_path):
+            return jsonify({'ok': False, 'error': 'Nessuna cache trovata — esegui prima il build'})
+
+        with open(cache_path, encoding='utf-8') as f:
+            cache = json.load(f)
+
+        meta = cache.get('societies_meta', {}).get(soc_cod)
+        if not meta:
+            return jsonify({'ok': False, 'error': 'Società non in cache'})
+
+        # Risultati FIDAL di questa società dalla cache
+        soc_fidal = [r for r in cache.get('data', []) if r.get('soc_cod') == soc_cod]
+        if not soc_fidal:
+            return jsonify({'ok': False, 'error': 'Nessun dato FIDAL per la società'})
+
+        # Manual entries aggiornati
+        manual_entries = _read_manual().get(cat, [])
+        soc_manual = _match_manual_to_soc(manual_entries, soc_cod, meta.get('nome', ''), soc_fidal)
+        _normalize_events(soc_manual, cat)
+        results_full = soc_fidal + soc_manual
+
+        # Ricalcola con lo stesso engine di api_ottimizza
+        _normalize_events(results_full, cat)
+        opt = _compute_optimal_best(results_full, cat)
+        if opt:
+            opt.pop('combo_scores', None)
+
+        # Aggiorna cache su disco
+        meta['manual_count'] = len(soc_manual)
+        if opt:
+            meta['optimal'] = opt
+        cache['societies_meta'][soc_cod] = meta
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False)
+
+        return jsonify({
+            'ok': True,
+            'score': opt['score'] if opt else 0,
+            'manual_count': len(soc_manual),
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'ok': False, 'error': str(e)})
+
 
 def _fetch_society_list(regione):
     """Scarica e restituisce la lista società di una regione da mappa.php."""
@@ -559,6 +795,30 @@ def _match_manual_to_soc(manual_entries, soc_cod, soc_nome, soc_results):
         matched.append(entry)
     return matched
 
+def _compute_optimal_best(results, cat):
+    """Calcola la scheda ottimale eseguendo una chiamata separata per ogni staffetta
+    eleggibile più una baseline senza staffette. Garantisce il vero ottimale globale:
+    una singola chiamata multi-combo lascerebbe il B&B pottare rami superiori dopo
+    aver fissato best_total sul primo combo valutato."""
+    from core.cds_optimizer import CdsOptimizer
+    ind_results    = [r for r in results if not r.get('isStaffetta')]
+    staff_eligible = [r for r in results if r.get('isStaffetta') and r.get('pts_ok')]
+
+    baseline   = CdsOptimizer.compute_optimal(ind_results, cat)
+    best_score = baseline['score'] if baseline else 0
+    best_opt   = baseline
+
+    for staff in staff_eligible:
+        opt_s = CdsOptimizer.compute_optimal(ind_results + [staff], cat)
+        if opt_s and opt_s['score'] > best_score:
+            best_score = opt_s['score']
+            best_opt   = opt_s
+
+    if best_opt:
+        best_opt.pop('combo_scores', None)
+    return best_opt
+
+
 def _opt_keepalive(results_full, cat):
     """Generatore: avvia l'ottimizzatore in un thread, emette ': keep\\n\\n' ogni 5s
     mentre aspetta, poi restituisce il risultato come valore del generatore."""
@@ -566,7 +826,7 @@ def _opt_keepalive(results_full, cat):
     result_box = [None]
     done = threading.Event()
     def _worker():
-        result_box[0] = CdsOptimizer.compute_optimal(results_full, cat)
+        result_box[0] = _compute_optimal_best(results_full, cat)
         done.set()
     threading.Thread(target=_worker, daemon=True).start()
     while not done.wait(5.0):
@@ -846,6 +1106,18 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   padding:.5rem .75rem;outline:none;transition:border-color .15s}
 .form-group select:focus,.form-group input:focus{border-color:var(--blue)}
 .form-group.span2{grid-column:1/-1}
+/* FIDAL CONNECTION STATUS */
+.fidal-status{display:flex;align-items:center;gap:.55rem;margin:.9rem 0 .2rem;
+  font-size:.78rem;color:var(--muted);min-height:1.4rem}
+.fidal-led{width:9px;height:9px;border-radius:50%;flex-shrink:0;transition:background .3s}
+.fidal-led.idle{background:#bbb}
+.fidal-led.checking{background:#f0c040;animation:led-pulse .9s ease-in-out infinite}
+.fidal-led.ok{background:#2ecc71}
+.fidal-led.error{background:#e74c3c}
+@keyframes led-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.btn-primary:disabled,.btn-secondary:disabled,.btn-build:disabled{
+  opacity:.38;cursor:not-allowed;pointer-events:none}
+
 .btn-primary{width:100%;margin-top:1.25rem;font-family:var(--head);font-size:1rem;
   font-weight:700;letter-spacing:.05em;text-transform:uppercase;background:var(--blue);
   color:#fff;border:none;border-radius:7px;padding:.75rem;cursor:pointer;transition:opacity .15s}
@@ -860,6 +1132,18 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   border:1.5px solid var(--muted);color:var(--muted);border-radius:7px;
   padding:.5rem;cursor:pointer;transition:all .15s}
 .btn-build:hover{border-color:var(--blue2);color:var(--blue2)}
+.btn-csv-form{width:100%;margin-top:.4rem;font-family:var(--head);font-size:.8rem;
+  font-weight:600;letter-spacing:.04em;text-transform:uppercase;background:transparent;
+  border:1.5px dashed #198754;color:#198754;border-radius:7px;
+  padding:.5rem;cursor:pointer;transition:all .15s}
+.btn-csv-form:hover{background:#198754;color:#fff}
+.csv-form-note{background:#e8f5ea;border:1px solid #a3d9a5;border-radius:6px;
+  padding:.45rem .8rem;font-size:.78rem;color:#1a5c35;margin-bottom:.75rem}
+.csv-disc-cat{font-weight:700;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;
+  color:var(--blue);margin-bottom:.2rem}
+.csv-disc-pill{display:inline-block;background:#f0f4fa;border:1px solid var(--border);
+  border-radius:3px;padding:.05rem .35rem;font-size:.72rem;font-family:monospace;
+  margin:.1rem .15rem .1rem 0;color:var(--text)}
 .build-area{margin-top:1rem;padding:1rem;background:var(--bg);border:1.5px solid var(--border);
   border-radius:8px}
 .build-area h4{font-family:var(--head);font-size:.8rem;font-weight:700;
@@ -901,6 +1185,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   cursor:pointer;font-size:.75rem;padding:.1rem .4rem;color:var(--muted);
   line-height:1;transition:all .15s}
 .clas-expand:hover{border-color:var(--blue);color:var(--blue)}
+.btn-open-soc{background:none;border:1px solid var(--blue);border-radius:4px;
+  cursor:pointer;font-size:.72rem;padding:.1rem .45rem;color:var(--blue);
+  line-height:1;transition:all .15s;white-space:nowrap}
+.btn-open-soc:hover{background:var(--blue);color:#fff}
 @keyframes bspin{to{transform:rotate(360deg)}}
 .bspin{display:inline-block;animation:bspin .8s linear infinite}
 .url-preview{margin-top:.75rem;font-family:var(--mono);font-size:.68rem;
@@ -966,6 +1254,13 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 .scard-verdict{font-size:.75rem;font-weight:600;margin-top:.35rem}
 .scard-verdict.ok{color:var(--green)}
 .scard-verdict.no{color:var(--orange)}
+
+/* AUTO-OPTIONS BAR */
+.auto-opts{background:#f0f4ff;border-bottom:1px solid var(--border);
+  padding:.3rem 2rem;display:flex;align-items:center;gap:1.4rem;flex-wrap:wrap;font-size:.75rem}
+.auto-opts label{display:flex;align-items:center;gap:.3rem;cursor:pointer;
+  color:var(--muted);user-select:none}
+.auto-opts input[type=checkbox]{accent-color:var(--blue);width:13px;height:13px;cursor:pointer}
 
 /* TOTALS BAR */
 .totbar{background:var(--blue);display:flex;align-items:center;
@@ -1125,6 +1420,61 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 .manual-badge{font-size:.6rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
   background:#fff3cd;color:#856404;border:1px solid #ffc107;padding:.07rem .35rem;
   border-radius:3px;margin-left:.35rem;vertical-align:middle}
+.btn-import-csv{font-family:var(--head);font-size:.78rem;font-weight:700;letter-spacing:.04em;
+  text-transform:uppercase;background:transparent;border:1.5px dashed #198754;
+  color:#198754;padding:.3rem .85rem;border-radius:6px;cursor:pointer;transition:all .15s}
+.btn-import-csv:hover{background:#198754;color:#fff}
+
+/* CSV IMPORT MODAL */
+.csv-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9000;
+  display:flex;align-items:center;justify-content:center;padding:1rem}
+.csv-modal{background:#fff;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.22);
+  width:min(700px,96vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden}
+.csv-modal-head{padding:.85rem 1.2rem;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.csv-modal-head h3{margin:0;font-size:1rem;font-family:var(--head);color:var(--text)}
+.csv-modal-close{background:none;border:none;font-size:1.3rem;cursor:pointer;
+  color:var(--muted);line-height:1;padding:.1rem .3rem}
+.csv-modal-close:hover{color:var(--red)}
+.csv-modal-body{overflow-y:auto;padding:1rem 1.2rem;flex:1}
+.csv-section{margin-bottom:1.1rem}
+.csv-section h4{font-family:var(--head);font-size:.78rem;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--muted);margin:0 0 .4rem}
+.csv-col-table{width:100%;border-collapse:collapse;font-size:.8rem}
+.csv-col-table th{background:#f0f4fa;font-family:var(--head);font-size:.67rem;font-weight:700;
+  letter-spacing:.05em;text-transform:uppercase;padding:.3rem .6rem;text-align:left;
+  border:1px solid var(--border)}
+.csv-col-table td{padding:.28rem .6rem;border:1px solid var(--border);vertical-align:top}
+.csv-col-table td.required{color:var(--red);font-weight:700}
+.csv-col-table td.optional{color:var(--muted)}
+.csv-col-table code{font-family:monospace;font-size:.77rem;background:#f5f5f5;
+  padding:.05rem .25rem;border-radius:3px}
+.csv-drop-zone{border:2px dashed #198754;border-radius:8px;padding:1.5rem 1rem;
+  text-align:center;cursor:pointer;transition:all .2s;background:#f8fff9}
+.csv-drop-zone:hover,.csv-drop-zone.drag-over{background:#e8f5ea;border-color:#0d6e40}
+.csv-drop-zone input[type=file]{display:none}
+.csv-drop-label{font-size:.88rem;color:#198754;font-weight:600}
+.csv-drop-sub{font-size:.74rem;color:var(--muted);margin-top:.25rem}
+.csv-file-chosen{font-size:.78rem;color:var(--text);margin-top:.5rem;font-weight:600}
+.csv-action-row{display:flex;gap:.6rem;margin-top:.9rem;align-items:center}
+.btn-csv-upload{font-family:var(--head);font-size:.82rem;font-weight:700;letter-spacing:.04em;
+  text-transform:uppercase;background:#198754;color:#fff;border:none;
+  padding:.42rem 1.1rem;border-radius:5px;cursor:pointer;transition:opacity .15s}
+.btn-csv-upload:hover{opacity:.85}
+.btn-csv-upload:disabled{opacity:.45;cursor:default}
+.btn-csv-template{font-family:var(--head);font-size:.78rem;font-weight:600;
+  background:transparent;border:1px solid #198754;color:#198754;
+  padding:.38rem .8rem;border-radius:5px;cursor:pointer;transition:all .15s}
+.btn-csv-template:hover{background:#198754;color:#fff}
+.csv-result-box{margin-top:.9rem}
+.csv-err-list{list-style:none;padding:0;margin:0}
+.csv-err-list li{font-size:.78rem;padding:.28rem .5rem;border-left:3px solid var(--red);
+  background:#fff5f5;margin-bottom:.3rem;border-radius:0 4px 4px 0}
+.csv-err-list li strong{color:var(--red)}
+.csv-ok-bar{background:#e8f5ea;border:1px solid #a3d9a5;border-radius:6px;
+  padding:.5rem .9rem;font-size:.84rem;color:#1a5c35;font-weight:600}
+.csv-warn-bar{background:#fff8e1;border:1px solid #ffe082;border-radius:6px;
+  padding:.5rem .9rem;font-size:.8rem;color:#7a5c00;margin-top:.4rem}
 
 /* GLOBAL FILTERS PANEL */
 .gfilter-panel{background:#fff;border-bottom:2px solid var(--border);padding:.6rem 2rem;display:flex;flex-direction:column;gap:.5rem}
@@ -1282,9 +1632,21 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 
       <div class="url-preview" id="url-preview">—</div>
       <div class="error-msg" id="form-error" style="display:none"></div>
-      <button class="btn-primary" onclick="fetchData()">⚡ Carica Graduatorie FIDAL</button>
-      <button class="btn-secondary" onclick="fetchProiezione()">📊 Proiezione regionale (da cache)</button>
-      <button class="btn-build" onclick="startBuildProiezione()">⚙ Costruisci / Aggiorna DB Regionale (analizza tutte le società)</button>
+
+      <!-- Indicatore connessione FIDAL -->
+      <div class="fidal-status">
+        <span class="fidal-led idle" id="fidal-led"></span>
+        <span id="fidal-status-txt">Verifica connessione FIDAL…</span>
+        <button id="fidal-retry-btn" onclick="checkFidalConnection()"
+          style="display:none;font-size:.7rem;padding:.1rem .45rem;margin-left:.3rem;
+                 border:1px solid var(--muted);border-radius:4px;background:transparent;
+                 color:var(--muted);cursor:pointer">↺ Riprova</button>
+      </div>
+
+      <button class="btn-primary" id="btn-fetch-fidal" onclick="fetchData()" disabled>⚡ Carica Graduatorie FIDAL</button>
+      <button class="btn-secondary" id="btn-fetch-proj" onclick="fetchProiezione()" disabled>📊 Proiezione regionale (da cache)</button>
+      <button class="btn-build" id="btn-build-proj" onclick="startBuildProiezione()" disabled>⚙ Costruisci / Aggiorna DB Regionale (analizza tutte le società)</button>
+      <button class="btn-csv-form" onclick="openCsvModal(true)">📂 Importa risultati da CSV (modalità manuale — senza caricare graduatorie FIDAL)</button>
       <!-- Area progress build -->
       <div class="build-area" id="build-area" style="display:none">
         <h4>
@@ -1335,6 +1697,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
       <span class="tag" id="tag-cat">—</span>
       <span class="tag acc" id="tag-tot">Tot. — pt</span>
     </div>
+    <button class="btn-back" id="btn-to-classifica" onclick="goToClassifica()"
+      style="display:none">🏆 Classifica</button>
     <button class="btn-back" onclick="goBack()">← Nuova ricerca</button>
   </div>
 
@@ -1407,6 +1771,19 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
   <div class="staff-panel" id="staff-panel" style="display:none">
     <h3>⚡ Analisi Staffette</h3>
     <div class="staff-cards" id="staff-cards"></div>
+  </div>
+
+  <!-- Auto-options bar -->
+  <div class="auto-opts">
+    <span style="font-weight:600;color:var(--muted);font-size:.7rem;letter-spacing:.04em;text-transform:uppercase">Auto</span>
+    <label title="Carica automaticamente i risultati manuali salvati per questa società all'apertura">
+      <input type="checkbox" id="opt-auto-manual" onchange="setAutoOpt('manual',this.checked)">
+      Carica manuali
+    </label>
+    <label title="Applica automaticamente il filtro disciplina CdS all'apertura">
+      <input type="checkbox" id="opt-auto-preset" onchange="setAutoOpt('preset',this.checked)">
+      Filtro CdS
+    </label>
   </div>
 
   <!-- Totals bar -->
@@ -1503,6 +1880,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
       <!-- Manual entry bar -->
       <div class="manual-bar">
         <button class="btn-add-manual" onclick="toggleManualForm()">➕ Aggiungi risultato manuale</button>
+        <button class="btn-import-csv" onclick="openCsvModal()">📂 Importa da CSV</button>
         <span style="font-size:.72rem;color:var(--muted)">per staffette non presenti o gare mancanti</span>
       </div>
       <div id="manual-form" style="display:none">
@@ -1562,7 +1940,86 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
     </div>
 
   </div><!-- /main -->
+
 </div><!-- /scr-tool -->
+
+<!-- CSV Import Modal — fuori da tutti gli .screen, visibile da qualsiasi schermata -->
+<div class="csv-overlay" id="csv-overlay" style="display:none" onclick="if(event.target===this)closeCsvModal()">
+  <div class="csv-modal" role="dialog" aria-labelledby="csv-modal-title">
+    <div class="csv-modal-head">
+      <h3 id="csv-modal-title">Importa risultati da file CSV</h3>
+      <button class="csv-modal-close" onclick="closeCsvModal()" title="Chiudi">&#x2715;</button>
+    </div>
+    <div class="csv-modal-body">
+
+      <!-- nota contestuale: visibile solo quando aperto dal form screen -->
+      <div class="csv-form-note" id="csv-form-note" style="display:none">
+        <strong>Modalità manuale:</strong> i parametri compilati nel form (categoria, società, anno…) verranno usati per aprire la schermata di lavoro.
+        Dopo l&apos;importazione si aprirà automaticamente il tool con i soli risultati caricati da file.
+      </div>
+
+      <div class="csv-section">
+        <h4>Come funziona</h4>
+        <p style="font-size:.82rem;margin:.3rem 0 .6rem">Prepara un file <strong>.csv</strong> con una riga di intestazione e una riga per ogni risultato da importare.
+        I record validi vengono aggiunti come inserimenti manuali e salvati in modo persistente.
+        Le righe con errori vengono segnalate ma <em>non</em> bloccano l&apos;importazione delle righe valide.</p>
+      </div>
+
+      <div class="csv-section">
+        <h4>Colonne richieste e valori ammessi</h4>
+        <table class="csv-col-table">
+          <thead><tr><th>Colonna</th><th>Obbl.</th><th>Valori ammessi / formato</th><th>Esempio</th></tr></thead>
+          <tbody>
+            <tr><td><code>categoria</code></td><td class="required">SI</td><td>CF &bull; CM &bull; RF &bull; RM</td><td>CF</td></tr>
+            <tr><td><code>gara</code></td><td class="required">SI</td><td>Nome disciplina dalla lista per la categoria (case-insensitive) &mdash; <button type="button" onclick="toggleDisciplineList()" style="background:none;border:none;color:var(--blue);cursor:pointer;font-size:.78rem;padding:0;text-decoration:underline" id="csv-disc-toggle">mostra lista ▾</button></td><td>300 piani</td></tr>
+            <tr><td><code>tipo</code></td><td class="required">SI</td><td>corsa &bull; ostacoli &bull; salto &bull; lancio &bull; staffetta</td><td>corsa</td></tr>
+            <tr><td><code>prestazione</code></td><td class="required">SI</td><td>Formato libero: secondi, m:ss.cc, metri</td><td>42.10 &nbsp;/&nbsp; 1:52.30 &nbsp;/&nbsp; 13.45</td></tr>
+            <tr><td><code>atleta</code></td><td class="required">SI</td><td>Nome atleta. Per staffetta: nomi separati da <code>/</code> o <code>,</code></td><td>ROSSI L. / BIANCHI M. / VERDI G. / NERI A.</td></tr>
+            <tr><td><code>punti</code></td><td class="optional">no</td><td>Intero &ge; 0. Lasciare vuoto se sconosciuto</td><td>638</td></tr>
+            <tr><td><code>vento</code></td><td class="optional">no</td><td>es. +1.2, -0.5, 0.0</td><td>+0.8</td></tr>
+            <tr><td><code>piazzamento</code></td><td class="optional">no</td><td>Numero intero</td><td>2</td></tr>
+            <tr><td><code>citta</code></td><td class="optional">no</td><td>Testo libero</td><td>Brescia</td></tr>
+            <tr><td><code>data</code></td><td class="optional">no</td><td>gg/mm/aaaa oppure gg/mm</td><td>18/04/2026</td></tr>
+          </tbody>
+        </table>
+        <p style="font-size:.74rem;color:var(--muted);margin:.45rem 0 0">
+          Le intestazioni delle colonne sono <strong>case-insensitive</strong> e gli spazi vengono ignorati.
+          Il separatore deve essere la virgola (<code>,</code>). Valori con virgola devono essere tra doppi apici.
+          Encoding supportati: UTF-8, UTF-8 con BOM, Latin-1.
+        </p>
+
+        <!-- Lista discipline collassabile -->
+        <div id="csv-discipline-list" style="display:none;margin-top:.7rem">
+          <div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:.4rem">Discipline valide per categoria</div>
+          <div id="csv-disc-content" style="font-size:.78rem;display:grid;grid-template-columns:1fr 1fr;gap:.5rem 1.5rem">
+            <div style="color:var(--muted);font-style:italic">Caricamento…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="csv-section">
+        <h4>Carica file</h4>
+        <div class="csv-drop-zone" id="csv-drop-zone"
+             onclick="document.getElementById('csv-file-input').click()"
+             ondragover="event.preventDefault();this.classList.add('drag-over')"
+             ondragleave="this.classList.remove('drag-over')"
+             ondrop="csvHandleDrop(event)">
+          <input type="file" id="csv-file-input" accept=".csv,text/csv" onchange="csvFileChosen(this.files[0])">
+          <div class="csv-drop-label">Clicca oppure trascina qui il file CSV</div>
+          <div class="csv-drop-sub">Solo file .csv &mdash; max 2 MB</div>
+          <div class="csv-file-chosen" id="csv-file-chosen" style="display:none"></div>
+        </div>
+        <div class="csv-action-row">
+          <button class="btn-csv-upload" id="btn-csv-upload" onclick="csvUpload()" disabled>Importa</button>
+          <button class="btn-csv-template" onclick="csvDownloadTemplate()">Scarica template CSV</button>
+          <span id="csv-upload-spinner" style="display:none;font-size:.8rem;color:var(--muted)">Caricamento...</span>
+        </div>
+        <div class="csv-result-box" id="csv-result-box" style="display:none"></div>
+      </div>
+
+    </div><!-- /csv-modal-body -->
+  </div>
+</div><!-- /csv-overlay -->
 
 <script>
 // ── COSTANTI ────────────────────────────────────────────
@@ -1635,6 +2092,12 @@ let _societiesMeta = {}; // pre-calcolato dal build, caricato con la proiezione
 let _classificaRanked = null; // ultimo ranked salvato da _renderClassifica, usato per export
 let currentCategoria = '', currentAnno = 2026, savedManualEntries = [];
 let unavailableAthletes = new Set(), minDateFilter = null;
+let _fidalConnected = false, _fidalCheckTimer = null;
+let _currentProiezioneP = null; // parametri dell'ultima proiezione caricata
+let currentSocieta = '';        // codice società corrente (stringa vuota in proiezione)
+// Impostazioni persistenti (localStorage)
+let autoLoadManual = localStorage.getItem('cds_autoLoadManual') !== 'false';
+let autoPresetCds  = localStorage.getItem('cds_autoPresetCds')  !== 'false';
 let societaList = [];
 let isProiezione = false;
 
@@ -1705,6 +2168,7 @@ document.getElementById('f-reg').addEventListener('change', () => {
 });
 updateCatOptions(); // popola la picklist categorie al caricamento
 loadSocieta(document.getElementById('f-reg').value); // carica società per la regione default
+setTimeout(checkFidalConnection, 0); // verifica connessione FIDAL dopo il parsing dello script
 
 // ── RICERCA SOCIETÀ ──────────────────────────────────────
 async function loadSocieta(regione){
@@ -1755,6 +2219,41 @@ function getFormParams(){
   };
 }
 
+// ── FIDAL CONNECTION STATUS ──────────────────────────────
+function _setFidalStatus(state, msg){
+  const led = document.getElementById('fidal-led');
+  const txt = document.getElementById('fidal-status-txt');
+  const retry = document.getElementById('fidal-retry-btn');
+  if (!led) return;
+  led.className = 'fidal-led ' + state;
+  txt.textContent = msg;
+  const connected = state === 'ok';
+  _fidalConnected = connected;
+  retry.style.display = state === 'error' ? '' : 'none';
+  ['btn-fetch-fidal','btn-fetch-proj','btn-build-proj'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = !connected;
+  });
+}
+
+async function checkFidalConnection(){
+  try {
+    _setFidalStatus('checking', 'Verifica connessione FIDAL…');
+    const resp = await fetch('/api/fidal_status', {cache:'no-store'});
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (data.ok){
+      _setFidalStatus('ok', `Connessione FIDAL attiva · ${data.latency_ms} ms`);
+    } else {
+      _setFidalStatus('error', `FIDAL non raggiungibile — ${(data.error||'?').slice(0,60)}`);
+    }
+  } catch(e){
+    try { _setFidalStatus('error', `Errore — ${(e.message||'?').slice(0,60)}`); } catch(_){}
+  }
+  clearTimeout(_fidalCheckTimer);
+  _fidalCheckTimer = setTimeout(checkFidalConnection, 60000);
+}
+
 // ── FETCH DATA ───────────────────────────────────────────
 async function fetchData(){
   const errEl = document.getElementById('form-error');
@@ -1771,6 +2270,7 @@ async function fetchData(){
     ALL = json.data;
     selectedIds.clear(); userPts = {}; staffAnalysis = []; excludedEvs = new Set();
     unavailableAthletes = new Set(); minDateFilter = null; isProiezione = false;
+    document.getElementById('staff-panel').style.display='none';
 
     // Segna miglior prestazione per disciplina
     computeBests();
@@ -1783,8 +2283,12 @@ async function fetchData(){
     // Popola UI
     setupToolScreen(p);
     show('scr-tool');
+    await _applyAutoOpts();
   } catch(e){
     errEl.style.display='block'; errEl.textContent='Errore: ' + e.message;
+    // Aggiorna il LED: potrebbe essere un problema di connessione FIDAL
+    _setFidalStatus('error', `Errore comunicazione FIDAL — ${e.message.slice(0,80)}`);
+    document.getElementById('fidal-retry-btn').style.display='';
   } finally {
     document.getElementById('loading').classList.add('hidden');
   }
@@ -1892,8 +2396,10 @@ function _proiezioneParams(p, force){
 function _applyProiezioneData(json, p){
   ALL = json.data;
   _societiesMeta = json.societies_meta || {};
+  _currentProiezioneP = p;
   selectedIds.clear(); userPts = {}; staffAnalysis = []; excludedEvs = new Set();
   unavailableAthletes = new Set(); minDateFilter = null; isProiezione = true;
+  document.getElementById('staff-panel').style.display='none';
   computeBests();
   ALL.filter(r=>r.isStaffetta).forEach(r=>{ r.staffAthl = resolveStaffettaAthletes(r.rawStaff); });
   _pruneForProiezione(10); // top-10 per evento: include atleti fino al 10° posto regionale
@@ -1970,10 +2476,11 @@ async function _bgRefreshProiezione(){
 
 function setupToolScreen(p){
   currentCategoria = p.categoria;
+  currentSocieta   = p.societa || '';
   currentAnno = +p.anno || new Date().getFullYear();
   document.getElementById('manual-reload-bar').style.display='none';
   savedManualEntries=[];
-  checkSavedManualEntries(p.categoria);
+  checkSavedManualEntries(p.categoria, p.societa || '');
 
   // Reset filtri globali
   document.getElementById('date-filter-input').value='';
@@ -1985,12 +2492,16 @@ function setupToolScreen(p){
   const catLabel = cat.options[cat.selectedIndex].text;
   const sesso = p.sesso==='F'?'Femminile':'Maschile';
   const proBar = document.getElementById('proiezione-bar');
+  const btnClas = document.getElementById('btn-to-classifica');
   if (isProiezione){
     proBar.style.display='';
+    if (btnClas) btnClas.style.display='none';
     document.getElementById('tool-title').textContent = `Proiezione Regionale — ${p.regione}`;
   } else {
     proBar.style.display='none';
-    document.getElementById('tool-title').textContent = 'Graduatorie — Soc. '+p.societa;
+    // Mostra "Classifica" solo se c'è una proiezione disponibile in memoria
+    if (btnClas) btnClas.style.display = _currentProiezioneP ? '' : 'none';
+    document.getElementById('tool-title').textContent = 'Graduatorie — ' + (p.societa_nome || ('Soc. ' + p.societa));
   }
   document.getElementById('tool-sub').textContent =
     `CdS ${catLabel} · ${p.tipo_attivita==='P'?'Outdoor':'Indoor'} ${p.anno} · ${p.regione}`;
@@ -2007,8 +2518,64 @@ function setupToolScreen(p){
   const staffette = ALL.filter(r=>r.isStaffetta);
   document.getElementById('staff-panel').style.display = staffette.length ? '' : 'none';
 
+  // Sincronizza i checkbox delle opzioni automatiche
+  const cbManual = document.getElementById('opt-auto-manual');
+  const cbPreset = document.getElementById('opt-auto-preset');
+  if (cbManual) cbManual.checked = autoLoadManual;
+  if (cbPreset) cbPreset.checked = autoPresetCds;
+
   buildEvFilterPanel();
   updateConstraints(); renderAll(); renderAthleteTracker();
+}
+
+function setAutoOpt(which, val){
+  if (which === 'manual'){ autoLoadManual = val; localStorage.setItem('cds_autoLoadManual', val); }
+  if (which === 'preset') { autoPresetCds  = val; localStorage.setItem('cds_autoPresetCds',  val); }
+}
+
+async function _applyAutoOpts(){
+  // Applica preset CdS se abilitato (sincrono, prima di caricare i manuali)
+  if (autoPresetCds && CDS_PROGRAMS[currentCategoria]) applyPresetCds();
+  // Carica manuali in silenzio se abilitato
+  if (autoLoadManual) await _ensureManualEntries();
+}
+
+async function _triggerSocReoptimize(soc_cod, categoria){
+  // Ricalcola l'ottimale nel JSON della proiezione cached dopo un cambio di manuali.
+  // Operazione in background: non blocca la UI, mostra solo una notifica breve.
+  if (!soc_cod || !categoria || !_currentProiezioneP) return;
+  const noteEl = document.getElementById('note-est');
+  const prev = noteEl ? noteEl.textContent : '';
+  if (noteEl) setNoteEst('⟳ Aggiornamento ottimale nella proiezione regionale…');
+  try {
+    const resp = await fetch('/api/reoptimize_soc', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        soc_cod,
+        categoria,
+        anno:          _currentProiezioneP.anno,
+        tipo_attivita: _currentProiezioneP.tipo_attivita,
+        sesso:         _currentProiezioneP.sesso,
+        regione:       _currentProiezioneP.regione,
+      }),
+    });
+    const data = await resp.json();
+    if (data.ok && _societiesMeta[soc_cod]) {
+      // Aggiorna la meta in memoria così la classifica riflette il nuovo punteggio
+      if (!_societiesMeta[soc_cod].optimal) _societiesMeta[soc_cod].optimal = {};
+      _societiesMeta[soc_cod].optimal.score = data.score;
+      _societiesMeta[soc_cod].manual_count  = data.manual_count;
+    }
+    if (noteEl) setNoteEst(data.ok
+      ? `✓ Proiezione aggiornata — nuovo ottimale: ${(data.score||0).toLocaleString('it')} pt`
+      : `⚠ Aggiornamento proiezione non riuscito: ${data.error||'?'}`
+    );
+  } catch(e){
+    if (noteEl) setNoteEst('⚠ Aggiornamento proiezione non riuscito');
+  }
+  // Ripristina il messaggio precedente dopo 4s
+  setTimeout(()=>{ if (noteEl) setNoteEst(''); }, 4000);
 }
 
 // ── MIGLIORI PRESTAZIONI ─────────────────────────────────
@@ -2158,9 +2725,37 @@ function toggleSelect(id){
 
 function clearAll(){ selectedIds.clear(); staffAnalysis=[]; topCombinations=[];
   renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
-  document.getElementById('staff-cards').innerHTML=''; }
+  document.getElementById('staff-cards').innerHTML='';
+  document.getElementById('staff-panel').style.display='none'; }
 
 function goBack(){ show('scr-form'); }
+
+async function goToClassifica(){
+  if (!_currentProiezioneP) return;
+  // Ricarica proiezione dalla cache (veloce, no fetch FIDAL) e mostra la classifica
+  document.getElementById('loading').classList.remove('hidden');
+  _setLoadingMsg('Caricamento proiezione…');
+  try {
+    const resp = await fetch('/api/proiezione?' + _proiezioneParams(_currentProiezioneP, false));
+    const json = await resp.json();
+    if (!json.ok) throw new Error(json.error||'Errore proiezione');
+    _applyProiezioneData(json, _currentProiezioneP);
+    setupToolScreen(_currentProiezioneP);
+    show('scr-tool');
+    buildEvFilterPanel();
+    renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+    // Apre direttamente la classifica
+    computeClassifica();
+    setTimeout(()=>{
+      const el = document.getElementById('clas-panel');
+      if (el) el.scrollIntoView({behavior:'smooth', block:'start'});
+    }, 150);
+  } catch(e){
+    alert('Errore: ' + e.message);
+  } finally {
+    document.getElementById('loading').classList.add('hidden');
+  }
+}
 function show(id){ document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   document.getElementById(id).classList.add('active'); }
 
@@ -2431,7 +3026,12 @@ function submitManual(){
   };
   fetch('/api/manual',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(savePayload)})
-    .then(res=>res.json()).then(json=>{ if(json.ok) r.savedId=json.savedId; })
+    .then(res=>res.json()).then(json=>{
+      if(json.ok){
+        r.savedId=json.savedId;
+        _triggerSocReoptimize(savePayload.soc_cod, savePayload.categoria);
+      }
+    })
     .catch(()=>{});
 
   computeBests();
@@ -2459,8 +3059,11 @@ function removeManual(id){
   const idx=ALL.findIndex(r=>r.id===id&&r.isManual);
   if (idx<0) return;
   const r=ALL[idx];
-  if (r.savedId)
-    fetch(`/api/manual/${r.savedId}`,{method:'DELETE'}).catch(()=>{});
+  if (r.savedId){
+    fetch(`/api/manual/${r.savedId}`,{method:'DELETE'})
+      .then(()=>_triggerSocReoptimize(currentSocieta, currentCategoria))
+      .catch(()=>{});
+  }
   ALL.splice(idx,1);
   selectedIds.delete(id);
   computeBests();
@@ -2468,14 +3071,215 @@ function removeManual(id){
   renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
 }
 
-async function checkSavedManualEntries(categoria){
+// ── CSV IMPORT ───────────────────────────────────────────────────────────────
+let _csvFile = null;
+let _csvOpenedFromForm = false;  // true = aperto dal form screen (modalità manuale)
+
+function openCsvModal(fromForm){
+  _csvOpenedFromForm = !!fromForm;
+  // Mostra/nasconde la nota contestuale
+  document.getElementById('csv-form-note').style.display = fromForm ? '' : 'none';
+  document.getElementById('csv-overlay').style.display='flex';
+  document.getElementById('csv-result-box').style.display='none';
+  document.getElementById('csv-result-box').innerHTML='';
+  document.getElementById('csv-file-input').value='';
+  document.getElementById('csv-file-chosen').style.display='none';
+  document.getElementById('btn-csv-upload').disabled=true;
+}
+function closeCsvModal(){
+  document.getElementById('csv-overlay').style.display='none';
+  _csvFile=null;
+  _csvOpenedFromForm=false;
+  document.getElementById('csv-file-input').value='';
+  document.getElementById('csv-file-chosen').style.display='none';
+  document.getElementById('btn-csv-upload').disabled=true;
+  document.getElementById('csv-result-box').style.display='none';
+  document.getElementById('csv-result-box').innerHTML='';
+  document.getElementById('csv-upload-spinner').style.display='none';
+}
+
+function csvFileChosen(file){
+  if (!file) return;
+  _csvFile=file;
+  const label=document.getElementById('csv-file-chosen');
+  label.textContent=`File selezionato: ${file.name} (${(file.size/1024).toFixed(1)} KB)`;
+  label.style.display='block';
+  document.getElementById('btn-csv-upload').disabled=false;
+  document.getElementById('csv-result-box').style.display='none';
+  document.getElementById('csv-result-box').innerHTML='';
+}
+
+function csvHandleDrop(e){
+  e.preventDefault();
+  document.getElementById('csv-drop-zone').classList.remove('drag-over');
+  const file=e.dataTransfer?.files?.[0];
+  if (file) csvFileChosen(file);
+}
+
+function csvDownloadTemplate(){
+  const a=document.createElement('a');
+  a.href='/api/manual/template_csv';
+  a.download='template_importazione_cds.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}
+
+let _discListLoaded = false;
+function toggleDisciplineList(){
+  const panel = document.getElementById('csv-discipline-list');
+  const toggle = document.getElementById('csv-disc-toggle');
+  const open = panel.style.display === 'none';
+  panel.style.display = open ? '' : 'none';
+  toggle.textContent = open ? 'nascondi lista ▴' : 'mostra lista ▾';
+  if (open && !_discListLoaded){
+    _discListLoaded = true;
+    fetch('/api/discipline_list').then(r=>r.json()).then(data=>{
+      const order = ['CF','CM','RF','RM'];
+      const labels = {CF:'Cadette (CF)', CM:'Cadetti (CM)', RF:'Ragazze (RF)', RM:'Ragazzi (RM)'};
+      const content = document.getElementById('csv-disc-content');
+      content.innerHTML = order.map(cat=>{
+        const pills = (data[cat]||[]).map(g=>`<span class="csv-disc-pill">${g}</span>`).join('');
+        return `<div><div class="csv-disc-cat">${labels[cat]}</div><div>${pills}</div></div>`;
+      }).join('');
+    }).catch(()=>{
+      document.getElementById('csv-disc-content').innerHTML='<em style="color:var(--muted)">Errore caricamento lista.</em>';
+    });
+  }
+}
+
+function _csvEntryToRow(entry){
+  return {
+    id: manualIdCounter++,
+    ev: entry.ev,
+    type: entry.type,
+    athlete: entry.athlete,
+    athlete_url: '',
+    perf: entry.perf,
+    wind: entry.wind||'',
+    piazz: entry.piazz||'',
+    citta: entry.citta||'',
+    data: entry.data||'',
+    anno: '',
+    pts: entry.pts||0,
+    pts_ok: entry.pts_ok||false,
+    isStaffetta: entry.isStaffetta||false,
+    rawStaff: entry.rawStaff||'',
+    staffAthl: entry.staffAthl||undefined,
+    isManual: true,
+    savedId: entry.savedId,
+  };
+}
+
+async function csvUpload(){
+  if (!_csvFile){ return; }
+  const btn=document.getElementById('btn-csv-upload');
+  const spin=document.getElementById('csv-upload-spinner');
+  const box=document.getElementById('csv-result-box');
+  btn.disabled=true; spin.style.display='inline'; box.style.display='none'; box.innerHTML='';
+
+  const fd=new FormData();
+  fd.append('file', _csvFile);
+
+  let json;
+  try {
+    const resp=await fetch('/api/manual/import_csv',{method:'POST',body:fd});
+    json=await resp.json();
+  } catch(err) {
+    spin.style.display='none'; btn.disabled=false;
+    box.innerHTML=`<div class="csv-warn-bar">Errore di rete: ${err.message}</div>`;
+    box.style.display='block';
+    return;
+  }
+  spin.style.display='none';
+
+  if (!json.ok && !json.imported){
+    box.innerHTML=`<div class="csv-warn-bar"><strong>Errore:</strong> ${json.error||'Importazione fallita'}</div>`;
+    box.style.display='block';
+    btn.disabled=false;
+    return;
+  }
+
+  const imported=json.imported||[];
+  const errors=json.errors||[];
+
+  // Feedback testuale
+  let html='';
+  if (imported.length>0){
+    const n=imported.length;
+    html+=`<div class="csv-ok-bar">${n} riga${n!==1?'he':''} importata${n!==1?'e':''} con successo.</div>`;
+  }
+  if (errors.length>0){
+    const n=errors.length;
+    html+=`<div class="csv-warn-bar" style="margin-top:.5rem"><strong>${n} riga${n!==1?'he':''} con errori (non importat${n!==1?'e':'a'}):</strong>
+    <ul class="csv-err-list" style="margin-top:.4rem">`;
+    errors.forEach(e=>{
+      const ante=e.anteprima?` <em style="color:var(--muted)">(${e.anteprima})</em>`:'';
+      html+=`<li><strong>Riga ${e.riga}${ante}:</strong> ${e.errori.join('; ')}</li>`;
+    });
+    html+=`</ul></div>`;
+  }
+  box.innerHTML=html; box.style.display='block';
+
+  if (imported.length>0){
+    if (_csvOpenedFromForm){
+      // ── Flusso da form screen: inizializza tool screen con i soli dati CSV ──
+      const p = getFormParams();
+      p.societa_nome = document.getElementById('f-societa-name')?.value?.trim() || '';
+      // La categoria può venire dal form oppure, se tutte le righe hanno la stessa, da lì
+      const cats=[...new Set(imported.map(e=>e.categoria))];
+      if (!p.categoria && cats.length===1) p.categoria=cats[0];
+
+      // Reset stato tool
+      ALL=[]; selectedIds.clear(); userPts={}; staffAnalysis=[]; excludedEvs=new Set();
+      unavailableAthletes=new Set(); minDateFilter=null; isProiezione=false;
+
+      // Popola ALL con i record importati (filtro per categoria del form)
+      imported.forEach(entry=>{
+        if (!p.categoria || entry.categoria===p.categoria) ALL.push(_csvEntryToRow(entry));
+      });
+
+      computeBests();
+      ALL.filter(r=>r.isStaffetta).forEach(r=>{ r.staffAthl=r.staffAthl||[]; });
+      setupToolScreen(p);
+      show('scr-tool');
+      await _applyAutoOpts();
+      // Chiudi il modale dopo un breve ritardo per far vedere il feedback
+      setTimeout(closeCsvModal, 1200);
+    } else {
+      // ── Flusso da tool screen: aggiunge ai risultati esistenti ──
+      imported.forEach(entry=>{
+        if (entry.categoria===currentCategoria) ALL.push(_csvEntryToRow(entry));
+      });
+      computeBests(); buildEvFilterPanel();
+      renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+      const evSel=document.getElementById('f-ev-filter');
+      imported.filter(e=>e.categoria===currentCategoria).forEach(e=>{
+        if(![...evSel.options].some(o=>o.value===e.ev)){
+          const o=document.createElement('option'); o.value=e.ev; o.textContent=e.ev; evSel.appendChild(o);
+        }
+      });
+    }
+  }
+  btn.disabled=false;
+}
+// ── END CSV IMPORT ────────────────────────────────────────────────────────────
+
+async function checkSavedManualEntries(categoria, soc_cod){
   try {
     const resp=await fetch(`/api/manual?categoria=${encodeURIComponent(categoria)}`);
     const json=await resp.json();
-    if (json.ok && json.data.length>0){
-      savedManualEntries=json.data;
-      document.getElementById('reload-count').textContent=json.data.length;
-      document.getElementById('manual-reload-bar').style.display='';
+    if (!json.ok) return;
+    // Mostra il banner solo per le entries di questa società.
+    // Se l'entry non ha soc_cod (entries vecchie) la includiamo per sicurezza.
+    const relevant = json.data.filter(e =>
+      !e.soc_cod || !soc_cod || e.soc_cod === soc_cod
+    );
+    if (relevant.length > 0){
+      savedManualEntries = relevant;
+      // Mostra il banner solo se il caricamento automatico è disabilitato
+      if (!autoLoadManual){
+        document.getElementById('reload-count').textContent = relevant.length;
+        document.getElementById('manual-reload-bar').style.display = '';
+      }
     }
   } catch(e){}
 }
@@ -2873,7 +3677,48 @@ function setNoteEst(msg, isError=false){
   }
 }
 
+async function _ensureManualEntries(){
+  if (!currentCategoria) return;
+  try {
+    const resp = await fetch(`/api/manual?categoria=${encodeURIComponent(currentCategoria)}`);
+    const json = await resp.json();
+    if (!json.ok || !json.data.length) return;
+    // Filtra per società corrente (stessa logica di checkSavedManualEntries)
+    const relevant = json.data.filter(e =>
+      !e.soc_cod || !currentSocieta || e.soc_cod === currentSocieta
+    );
+    if (!relevant.length) return;
+    let added = false;
+    for (const entry of relevant) {
+      if (ALL.some(r => r.savedId === entry.savedId)) continue;
+      const r = {
+        id: manualIdCounter++,
+        ev: entry.ev, type: entry.type,
+        athlete: entry.athlete, athlete_url: '',
+        perf: entry.perf, wind: entry.wind||'', piazz: entry.piazz||'',
+        citta: entry.citta||'', data: entry.data||'', anno: entry.anno||'',
+        pts: entry.pts||0, pts_ok: entry.pts_ok||false,
+        isStaffetta: entry.isStaffetta||false,
+        rawStaff: entry.rawStaff||'',
+        staffAthl: entry.staffAthl||undefined,
+        isManual: true, savedId: entry.savedId,
+      };
+      if (r.isStaffetta && !r.staffAthl)
+        r.staffAthl = resolveStaffettaAthletes(r.rawStaff);
+      ALL.push(r);
+      added = true;
+    }
+    if (added) {
+      computeBests(); buildEvFilterPanel();
+      renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+      document.getElementById('manual-reload-bar').style.display = 'none';
+      savedManualEntries = [];
+    }
+  } catch(e) {}
+}
+
 async function computeOptimal(){
+  await _ensureManualEntries();
   const missing=activeAll().filter(r=>userPts[r.id]===undefined&&!r.pts_ok);
   if (missing.length>0){
     setNoteEst(`⚠ ${missing.length} risultat${missing.length===1?'o':'i'} senza punteggio — inserisci i punti FIDAL per tutti prima di calcolare.`, true);
@@ -2919,13 +3764,29 @@ async function computeOptimal(){
       
       if (!res.optimal || !res.optimal.sel || res.optimal.sel.length !== C.nSel){
           setNoteEst(`⚠ Impossibile trovare ${C.nSel} risultati validi che incastrino tutti i vincoli.`, true);
+          staffAnalysis = [];
       } else {
           setNoteEst('');
-          staffAnalysis = []; 
           res.optimal.sel.forEach(r => selectedIds.add(Number(r.id)));
+
+          // Costruisce analisi per ogni staffetta in activeAll() con pts_ok
+          const baselineScore = res.baseline_score || 0;
+          const staffScores   = res.staff_scores   || {};
+          const staffette = activeAll().filter(r => r.isStaffetta && r.pts_ok);
+          staffAnalysis = staffette.map(staff => {
+              const inOpt  = selectedIds.has(staff.id);
+              const sid    = String(staff.id);
+              // tCon: se nell'ottimale usiamo il punteggio esatto; altrimenti il
+              // best calcolato dall'ottimizzatore per quella combo (0 se non trovato).
+              const tCon   = inOpt ? res.optimal.score : (staffScores[sid] || 0);
+              const tSenza = baselineScore;
+              const delta  = tCon - tSenza;
+              return {staff, tCon, tSenza, delta, inOpt};
+          });
       }
-      
+
       renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+      renderStaffettaAnalysis();
       
   } catch(e) {
       alert("Errore calcolo ottimale: " + e.message);
@@ -3050,10 +3911,15 @@ function _renderClassifica(data, title, content){
     if (s.pts_staffette) bk.push(`🔄 ${s.pts_staffette.toLocaleString('it')} staff.`);
     const breakdown = bk.join(' · ');
 
-    // Bottone view data (sempre presente poiché ranked ha solo società con optimal)
+    // Bottone expand dettaglio
     const viewBtn = s.optimal.sel && s.optimal.sel.length
       ? `<button class="clas-expand" onclick="toggleClasDetail('${rid}')">+</button>`
       : '';
+
+    // Bottone "Apri scheda" — carica la società nella vista tool
+    // Usa virgolette singole per l'attributo onclick così JSON.stringify (doppie) non rompe l'HTML
+    const openBtn = `<button class="btn-open-soc" title="Apri scheda"
+        onclick='loadSocFromClassifica(${JSON.stringify(s.cod)})'>📂 Apri</button>`;
 
     // Riga principale
     const mainRow = `<tr>
@@ -3063,6 +3929,7 @@ function _renderClassifica(data, title, content){
       <td style="color:var(--muted);font-size:.71rem;white-space:nowrap">${breakdown}</td>
       <td class="clas-bar-cell"><div class="clas-bar" style="width:${barW}%"></div></td>
       <td style="width:28px">${viewBtn}</td>
+      <td style="width:70px">${openBtn}</td>
     </tr>`;
 
     // Riga dettaglio (scheda ottimale espandibile)
@@ -3100,10 +3967,82 @@ function _renderClassifica(data, title, content){
       <th>#</th><th>Società</th>
       <th title="'CdS ottimale' = scheda calcolata con vincoli (13 ris., min 10 gare, min 2 lanci+salti); 'tot. disponibile' = somma grezza, rigenera il DB per il valore esatto">Punti</th>
       <th style="font-size:.67rem">Corsa · Salti · Lanci · Staff</th>
-      <th></th><th></th>
+      <th></th><th></th><th></th>
     </tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
+}
+
+async function loadSocFromClassifica(cod){
+  const meta = _societiesMeta[cod];
+  if (!meta || !_currentProiezioneP) {
+    alert('Dati non disponibili. Ricarica la proiezione regionale.');
+    return;
+  }
+
+  // Aggiorna i campi del form così l'URL preview e getFormParams() sono coerenti
+  const socInput = document.getElementById('f-societa');
+  if (socInput) { socInput.value = cod; updateUrlPreview(); }
+  const socNameEl = document.getElementById('f-societa-name');
+  if (socNameEl) socNameEl.value = meta.nome || '';
+
+  const p = { ..._currentProiezioneP, societa: cod, societa_nome: meta.nome || cod };
+
+  document.getElementById('loading').classList.remove('hidden');
+  _setLoadingMsg('Caricamento dati FIDAL…');
+
+  try {
+    // Chiamata FIDAL identica a fetchData() ma con la società specifica
+    const params = new URLSearchParams({
+      anno:          p.anno,
+      tipo_attivita: p.tipo_attivita,
+      sesso:         p.sesso,
+      categoria:     p.categoria,
+      regione:       p.regione,
+      nazionalita:   p.nazionalita || '0',
+      vento:         p.vento       || '2',
+      limite:        p.limite      || '100',
+      societa:       cod,
+    });
+    const resp = await fetch('/api/fetch?' + params);
+    const json = await resp.json();
+    if (!json.ok) throw new Error(json.error);
+
+    ALL = json.data;
+    selectedIds.clear(); userPts = {}; staffAnalysis = []; excludedEvs = new Set();
+    unavailableAthletes = new Set(); minDateFilter = null; isProiezione = false;
+    document.getElementById('staff-panel').style.display = 'none';
+
+    computeBests();
+    ALL.filter(r => r.isStaffetta).forEach(r => {
+      r.staffAthl = resolveStaffettaAthletes(r.rawStaff);
+    });
+
+    // Applica la selezione ottimale pre-calcolata abbinando per (ev, athlete, perf)
+    // Gli id cambiano a ogni fetch fresco, quindi non si può usare id numerico
+    if (meta.optimal && meta.optimal.sel && meta.optimal.sel.length) {
+      meta.optimal.sel.forEach(optR => {
+        const match = ALL.find(r =>
+          r.ev === optR.ev &&
+          r.athlete === optR.athlete &&
+          String(r.perf) === String(optR.perf)
+        );
+        if (match) selectedIds.add(match.id);
+      });
+    }
+
+    setupToolScreen(p);
+    show('scr-tool');
+    renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+    await _applyAutoOpts();
+
+  } catch(e) {
+    alert('Errore caricamento società: ' + e.message);
+    // Ripristina il LED se l'errore è di rete
+    try { _setFidalStatus('error', `Errore — ${e.message.slice(0,60)}`); } catch(_){}
+  } finally {
+    document.getElementById('loading').classList.add('hidden');
+  }
 }
 
 function toggleClasDetail(rid){
@@ -3218,40 +4157,53 @@ function printClassificaPDF(){
 
 // ── STAFFETTA ANALYSIS ────────────────────────────────────
 function renderStaffettaAnalysis(){
+  const panel=document.getElementById('staff-panel');
   const container=document.getElementById('staff-cards');
-  if (!staffAnalysis.length){container.innerHTML='';return;}
+  if (!staffAnalysis.length){
+    container.innerHTML='';
+    panel.style.display='none';
+    return;
+  }
+  panel.style.display='';
   container.innerHTML=staffAnalysis.map(({staff,tCon,tSenza,delta,inOpt})=>{
     const p=pts(staff);
     const chips=(staff.staffAthl||[staff.athlete]).map(a=>`<span class="chip">${a}</span>`).join('');
-    // Determina stato: nell'ottimale / conviene da sola ma esclusa / non conviene
-    let cardCls, verdictCls, verdictTxt;
+    let cardCls, verdictCls, verdictTxt, conLabel;
     if (inOpt){
       cardCls='ok'; verdictCls='ok';
       verdictTxt=`✅ Nell'ottimale · +${delta} pt vs. nessuna staffetta`;
+      conLabel=`<strong>${tCon} pt</strong>`;
+    } else if (tCon===0){
+      // Combo potata interamente dal B&B prima della valutazione: punteggio non disponibile
+      cardCls='no'; verdictCls='no';
+      verdictTxt=`❌ Esclusa — combinazione non valutata (superata dall'ottimale)`;
+      conLabel=`<span style="color:var(--muted)">n/d</span>`;
     } else if (delta>0){
       cardCls='warn'; verdictCls='warn';
-      // Individua la causa reale dell'esclusione
       const v2=validate();
       const athls=staff.staffAthl||[staff.athlete];
       const bloccate=athls.filter(a=>(v2.atlCount[a]||0)>=2);
-      const motivo = bloccate.length
+      const motivo=bloccate.length
         ? `${bloccate.join(', ')} ${bloccate.length===1?'è già':'sono già'} a 2 gare nell'ottimale`
         : 'le atlete hanno più valore nelle gare individuali dell\'ottimale';
       verdictTxt=`⚠ Conviene da sola (+${delta} pt) ma esclusa — ${motivo}`;
+      conLabel=`<strong>${tCon} pt</strong>`;
     } else {
       cardCls='no'; verdictCls='no';
       verdictTxt=`❌ Non conviene (${delta} pt) — le atlete valgono di più individualmente`;
+      conLabel=`<strong>${tCon} pt</strong>`;
     }
+    const manBadge=staff.isManual?'<span class="manual-badge">manuale</span>':'';
     return `<div class="staff-card ${cardCls}">
       <div class="scard-head">
-        <span class="scard-ev">${staff.ev}</span>
+        <span class="scard-ev">${staff.ev}${manBadge}</span>
         <span class="scard-perf">${staff.perf}</span>
         <span class="scard-pts">${p} pt${staff.est&&userPts[staff.id]===undefined?' ~':''}</span>
         <span style="margin-left:auto;font-size:.68rem;color:var(--muted)">${(staff.staffAthl||[]).length} atlete</span>
       </div>
       <div class="chips">${chips}</div>
       <div style="font-size:.7rem;color:var(--muted)">
-        Con: <strong>${tCon} pt</strong> &nbsp;|&nbsp; Senza: <strong>${tSenza} pt</strong>
+        Con: ${conLabel} &nbsp;|&nbsp; Senza: <strong>${tSenza} pt</strong>
       </div>
       <div class="scard-verdict ${verdictCls}">${verdictTxt}</div>
     </div>`;
