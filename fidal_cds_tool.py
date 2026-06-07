@@ -1827,12 +1827,12 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
       <div style="overflow-x:auto">
         <table class="tbl">
           <thead><tr>
-            <th>#</th><th>Tipo</th><th>Disciplina</th><th>Atleta/e</th>
+            <th>#</th><th>Tipo</th><th>Disciplina</th><th>Atleta/e</th><th>Anno</th>
             <th>Prest.</th><th>Piazz.</th><th>Città</th><th>Data</th>
             <th style="text-align:right">Punti FIDAL</th><th></th>
           </tr></thead>
           <tbody id="pros-body">
-            <tr><td colspan="8" style="padding:2rem;text-align:center;color:var(--muted)">
+            <tr><td colspan="9" style="padding:2rem;text-align:center;color:var(--muted)">
               Clicca <strong>⚡ Calcola Ottimale</strong> o seleziona manualmente dalla tabella sotto.
             </td></tr>
           </tbody>
@@ -1881,6 +1881,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
             <th onclick="sortAll(0)">Tipo ⇅</th>
             <th onclick="sortAll(1)">Disciplina ⇅</th>
             <th onclick="sortAll(2)">Atleta ⇅</th>
+            <th>Anno</th>
             <th onclick="sortAll(3)">Prest. ⇅</th>
             <th>Vento</th>
             <th onclick="sortAll(4)">Piazz. ⇅</th>
@@ -2854,7 +2855,7 @@ function renderProspetto(){
 
   const tbody=document.getElementById('pros-body');
   if (!sel.length){
-    tbody.innerHTML='<tr><td colspan="10" style="padding:2rem;text-align:center;color:var(--muted)">Nessun risultato selezionato.</td></tr>';
+    tbody.innerHTML='<tr><td colspan="11" style="padding:2rem;text-align:center;color:var(--muted)">Nessun risultato selezionato.</td></tr>';
     updateConstraints();
     return;
   }
@@ -2869,6 +2870,7 @@ function renderProspetto(){
       <td><span class="etype ${r.type}">${TYPE_LBL[r.type]}</span></td>
       <td style="font-weight:600;white-space:nowrap">${r.ev}${dbl}</td>
       <td style="font-size:.78rem">${athleteDisplay(r)}${tieBadge}</td>
+      <td style="font-size:.75rem;color:var(--muted);font-family:var(--mono)">${r.anno||''}</td>
       <td class="perf">${best}${r.perf}${r.wind?` <span style="font-size:.68rem;color:var(--muted)">${r.wind}</span>`:''}</td>
       <td style="font-size:.75rem;color:var(--muted)">${r.piazz||''}</td>
       <td style="font-size:.75rem;color:var(--muted);white-space:nowrap">${r.citta||''}</td>
@@ -2939,6 +2941,7 @@ function renderAll(){
       <td><span class="etype ${r.type}">${TYPE_LBL[r.type]}</span></td>
       <td style="font-weight:600;white-space:nowrap;font-size:.8rem">${r.ev}${manualBadge}</td>
       <td style="font-size:.78rem" onclick="event.stopPropagation()">${athleteDisplay(r)}</td>
+      <td style="color:var(--muted);font-size:.72rem;font-family:var(--mono)">${r.anno||''}</td>
       <td class="perf">${best}${r.perf}</td>
       <td style="color:var(--muted);font-size:.72rem">${r.wind||'—'}</td>
       <td style="color:var(--muted);font-size:.72rem">${r.piazz||''}</td>
@@ -4084,9 +4087,9 @@ function downloadClassificaCSV(){
       s.num_gare||0, s.n_lanci||0, s.n_salti||0,
     ]);
     if (s.optimal.sel && s.optimal.sel.length){
-      rows.push(['','— Scheda ottimale —','','','','','','','','']);
+      rows.push(['','— Scheda ottimale —','','','','','','','','','']);
       s.optimal.sel.slice().sort((a,b)=>(b.pts||0)-(a.pts||0)).forEach(r=>{
-        rows.push(['', '', r.pts||0, '', '', '', '', r.ev, r.athlete||'', r.perf||'']);
+        rows.push(['', '', r.pts||0, '', '', '', '', r.ev, r.athlete||'', r.anno||'', r.perf||'']);
       });
     }
   });
@@ -4274,6 +4277,7 @@ function printPDF(){
       <td style="padding:5px 7px"><span style="background:${typeClr};font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:2px 5px;border-radius:3px">${TYPE_LBL[r.type]}</span></td>
       <td style="padding:5px 7px;font-weight:600;font-size:9pt">${r.ev}${dbl}</td>
       <td style="padding:5px 7px;font-size:8.5pt">${athlD}</td>
+      <td style="padding:5px 7px;font-family:monospace;font-size:8pt;color:#6b82a0;text-align:center">${r.anno||''}</td>
       <td style="padding:5px 7px;font-family:monospace;font-weight:600;color:#054FAE;font-size:9pt">${best}${r.perf}${r.wind?' <span style="font-size:7pt;color:#999">'+r.wind+'</span>':''}</td>
       <td style="padding:5px 7px;font-size:8pt;color:#6b82a0">${r.piazz||''}</td>
       <td style="padding:5px 7px;font-size:8pt;color:#6b82a0">${r.citta||''}</td>
@@ -4326,6 +4330,7 @@ function printPDF(){
       <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase;width:70px">Tipo</th>
       <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase">Disciplina</th>
       <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase">Atleta/e</th>
+      <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase;width:38px">Anno</th>
       <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase">Prestazione</th>
       <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase;width:60px">Piazz.</th>
       <th style="padding:6px 7px;font-size:7.5pt;font-weight:700;letter-spacing:.05em;text-transform:uppercase;width:65px">Città</th>
@@ -4336,7 +4341,7 @@ function printPDF(){
   <tbody>${rows}</tbody>
   <tfoot>
     <tr style="background:#054FAE;color:#fff">
-      <td colspan="8" style="padding:7px 7px;font-size:9pt;font-weight:700;text-transform:uppercase;letter-spacing:.05em">Totale scheda</td>
+      <td colspan="9" style="padding:7px 7px;font-size:9pt;font-weight:700;text-transform:uppercase;letter-spacing:.05em">Totale scheda</td>
       <td style="padding:7px 7px;text-align:right;font-family:monospace;font-size:13pt;font-weight:800;color:#00C9FF">${total.toLocaleString('it')}</td>
     </tr>
   </tfoot>
