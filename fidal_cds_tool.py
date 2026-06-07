@@ -276,6 +276,16 @@ def _normalize_events(data, categoria):
         if key:
             row['ev'] = key
 
+_COMPETE_THRESH = {
+    'RF': (6, 1, 1),
+    'RM': (6, 1, 1),
+}
+
+def _can_compete_cat(n_ev, n_la, n_sa, cat):
+    min_ev, min_la, min_sa = _COMPETE_THRESH.get(cat, (10, 2, 2))
+    return n_ev >= min_ev and n_la >= min_la and n_sa >= min_sa
+
+
 def _soc_meta(results, cat=None):
     """Statistiche aggregate per una società: totale punti, breakdown per tipo, eleggibilità."""
     _lanci_kw = {'peso','martello','giavellotto','disco','lancio','vortex','palla'}
@@ -306,7 +316,7 @@ def _soc_meta(results, cat=None):
         'pts_staffette': pts_staff,
         'n_lanci':       n_la,
         'n_salti':       n_sa,
-        'can_compete':   n_ev >= 10 and n_la >= 2 and n_sa >= 2,
+        'can_compete':   _can_compete_cat(n_ev, n_la, n_sa, cat),
     }
 
 # ── OTTIMIZZATORE PYTHON (per build server-side) ─────────────────────────────
@@ -333,11 +343,14 @@ def api_proiezione():
             with open(cache_path, encoding='utf-8') as f:
                 cached = json.load(f)
             _normalize_events(cached['data'], cat)   # fix retroattivo su cache esistenti
-            # Restituisce la meta senza il campo 'data' per non gonfiare il payload
-            meta_clean = {
-                cod: {k: v for k, v in m.items() if k != 'data'}
-                for cod, m in cached.get('societies_meta', {}).items()
-            }
+            # Restituisce la meta senza il campo 'data' per non gonfiare il payload.
+            # Ricalcola can_compete con i criteri corretti per la categoria (fix retroattivo).
+            meta_clean = {}
+            for cod, m in cached.get('societies_meta', {}).items():
+                entry = {k: v for k, v in m.items() if k != 'data'}
+                entry['can_compete'] = _can_compete_cat(
+                    m.get('num_gare', 0), m.get('n_lanci', 0), m.get('n_salti', 0), cat)
+                meta_clean[cod] = entry
             return jsonify({'ok': True, 'from_cache': True,
                             'data': cached['data'], 'updated_at': cached['updated_at'],
                             'societies_meta': meta_clean})
@@ -583,6 +596,8 @@ def api_manual_import_csv():
                         pts_ok = True
                 except ValueError:
                     row_errors.append(f'punti "{punti_raw}" non è un numero intero')
+            elif perf and gara_canonica and categoria:
+                pts_num, pts_ok = _lookup_pts(gara_canonica, perf, categoria)
 
             if row_errors:
                 errors.append({'riga': row_idx, 'errori': row_errors,
@@ -986,7 +1001,7 @@ def api_proiezione_build():
                             n_ev = len(ev_set)
                             n_la = sum(1 for ev in ev_set if any(k in ev.lower() for k in _lanci))
                             n_sa = sum(1 for ev in ev_set if any(k in ev.lower() for k in _salti))
-                            can_compete = n_ev >= 10 and n_la >= 2 and n_sa >= 2
+                            can_compete = _can_compete_cat(n_ev, n_la, n_sa, cat)
                             opt_score = meta_entry.get('optimal', {}).get('score', -1)
                             compete_tag = '🏆' if can_compete else '⚠'
                             opt_str = f' · ottimale Σ {opt_score}' if (can_compete and opt_score > 0) else ''
@@ -3850,8 +3865,9 @@ async function computeClassifica(){
       else if (t==='salto')            pts_salti+=p;
       else if (t==='staffetta')        pts_staffette+=p;
     }
+    const _Cc=CONSTRAINTS[currentCategoria]||CONSTRAINTS.default;
     return {nome,total_pts,pts_corsa,pts_lanci,pts_salti,pts_staffette,
-            num_gare:n_ev,n_lanci,n_salti,can_compete:n_ev>=10&&n_lanci>=2&&n_salti>=2};
+            num_gare:n_ev,n_lanci,n_salti,can_compete:n_ev>=_Cc.minEv&&n_lanci>=_Cc.minLanci&&n_salti>=_Cc.minSalti};
   });
   console.log(`[Classifica] Calcolate ${data.length} società da ALL.`);
   _renderClassifica(data, title, content);
