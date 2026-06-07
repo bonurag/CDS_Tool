@@ -168,6 +168,15 @@ def classify_event(nome):
     if re.search(r'peso|martello|giavellotto|disco|lancio|vortex|palla', n): return 'lancio'
     return 'corsa'
 
+def _expand_year(raw: str) -> str:
+    """Converte l'anno FIDAL da 2 cifre a 4 cifre (es. '12' → '2012')."""
+    s = raw.strip()
+    if s.isdigit() and len(s) <= 2:
+        y = int(s)
+        return str(2000 + y if y <= 99 else 1900 + y)
+    return s
+
+
 def parse_graduatorie(html):
     soup = BeautifulSoup(html, 'html.parser')
     results, rid = [], 0
@@ -197,7 +206,7 @@ def parse_graduatorie(html):
                 'piazz':        cols[5].get_text(strip=True),
                 'citta':        cols[6].get_text(strip=True) if len(cols) > 6 else '',
                 'data':         (data_a or cols[7]).get_text(strip=True) if len(cols) > 7 else '',
-                'anno':         abbr['title'] if abbr else '',
+                'anno':         _expand_year(abbr['title']) if abbr else '',
                 'pts':          0,
                 'est':          True,
                 'isStaffetta':  tipo == 'staffetta',
