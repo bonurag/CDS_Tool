@@ -206,7 +206,7 @@ def parse_graduatorie(html):
                 'piazz':        cols[5].get_text(strip=True),
                 'citta':        cols[6].get_text(strip=True) if len(cols) > 6 else '',
                 'data':         (data_a or cols[7]).get_text(strip=True) if len(cols) > 7 else '',
-                'anno':         _expand_year(abbr['title']) if abbr else '',
+                'anno':         _expand_year(abbr.get_text(strip=True)) if abbr else '',
                 'pts':          0,
                 'est':          True,
                 'isStaffetta':  tipo == 'staffetta',
