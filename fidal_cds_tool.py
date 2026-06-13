@@ -4155,7 +4155,7 @@ async function _loadGapPanel(rid) {
 
   const tabella = await _getTabellaCategoria(cat);
 
-  const sel = (s.optimal.sel || []).filter(r => !r.isStaffetta && r.pts_ok && r.pts > 0);
+  const sel = (s.optimal.sel || []).filter(r => !r.isStaffetta && r.pts > 0);
   const improvements = [];
   for (const r of sel) {
     const tabEv = tabella[r.ev];
