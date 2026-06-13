@@ -520,6 +520,24 @@ _CSV_TEMPLATE_ROWS = [
 def api_discipline_list():
     return jsonify({cat: _gare_valide(cat) for cat in _CSV_VALID_CATEGORIE})
 
+@app.route('/api/tabelle', methods=['GET'])
+def api_tabelle():
+    """Restituisce le tabelle punteggi per categoria.
+    ?categoria=CF  → solo CF
+    (nessun param) → tutte le categorie
+    """
+    cat = request.args.get('categoria', '').upper()
+    if cat:
+        if cat not in _TABELLE:
+            return jsonify({'ok': False, 'error': f'Categoria {cat} non trovata'}), 404
+        data = {cat: _TABELLE[cat]}
+    else:
+        data = _TABELLE
+    from flask import make_response
+    resp = make_response(jsonify({'ok': True, 'tabelle': data}))
+    resp.headers['Cache-Control'] = 'public, max-age=3600'
+    return resp
+
 @app.route('/api/manual/template_csv', methods=['GET'])
 def api_manual_template_csv():
     content = '\r\n'.join(_CSV_TEMPLATE_ROWS) + '\r\n'
@@ -1205,6 +1223,20 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);min-height:1
 .clas-detail-table{width:100%;border-collapse:collapse;font-size:.76rem}
 .clas-detail-table td{padding:.18rem .5rem;border-bottom:1px solid var(--border)}
 .clas-detail-table tr:last-child td{border:none}
+.clas-gap-badge{display:inline-block;background:#fff3cd;color:#7a4f00;border:1px solid #ffc107;
+  border-radius:4px;font-size:.72rem;font-weight:700;padding:1px 7px;white-space:nowrap}
+.clas-gap-zero{color:var(--muted);font-size:.72rem;font-style:italic}
+.gap-panel{margin-top:.65rem;border-top:1px solid var(--border);padding-top:.55rem}
+.gap-panel-title{font-family:var(--head);font-size:.7rem;font-weight:700;letter-spacing:.05em;
+  text-transform:uppercase;color:var(--muted);margin-bottom:.35rem}
+.gap-impr-table{width:100%;border-collapse:collapse;font-size:.74rem}
+.gap-impr-table th{background:#f0f4fa;font-family:var(--head);font-size:.65rem;font-weight:700;
+  letter-spacing:.04em;text-transform:uppercase;padding:.22rem .5rem;text-align:left}
+.gap-impr-table td{padding:.2rem .5rem;border-bottom:1px solid var(--border)}
+.gap-impr-table tr:last-child td{border:none}
+.gap-delta{font-family:var(--mono);font-weight:700;color:var(--green)}
+.gap-perf-arr{color:var(--muted);margin:0 .25rem}
+.gap-tot-row td{font-weight:700;background:#f7faff;font-size:.75rem}
 .clas-expand{background:none;border:1px solid var(--border);border-radius:4px;
   cursor:pointer;font-size:.75rem;padding:.1rem .4rem;color:var(--muted);
   line-height:1;transition:all .15s}
@@ -2115,6 +2147,17 @@ function getC(){ return CONSTRAINTS[currentCategoria] || CONSTRAINTS.default; }
 let ALL = [], selectedIds = new Set(), userPts = {}, staffAnalysis = [], excludedEvs = new Set(), topCombinations = [];
 let _societiesMeta = {}; // pre-calcolato dal build, caricato con la proiezione
 let _classificaRanked = null; // ultimo ranked salvato da _renderClassifica, usato per export
+let _tabelleCache = {};   // cache tabelle punteggi: categoria → {gara → {perf → pts}}
+
+async function _getTabellaCategoria(cat) {
+  if (_tabelleCache[cat]) return _tabelleCache[cat];
+  try {
+    const r = await fetch(`/api/tabelle?categoria=${cat}`);
+    const j = await r.json();
+    if (j.ok) _tabelleCache[cat] = j.tabelle[cat] || {};
+  } catch(e) { _tabelleCache[cat] = {}; }
+  return _tabelleCache[cat] || {};
+}
 let currentCategoria = '', currentAnno = 2026, savedManualEntries = [];
 let unavailableAthletes = new Set(), minDateFilter = null;
 let _fidalConnected = false, _fidalCheckTimer = null;
@@ -3920,11 +3963,13 @@ function _renderClassifica(data, title, content){
   }
 
   _classificaRanked = ranked;
+  _clasDataByRid = {};   // reset mappa rid → {s, maxPts, cat}
   const maxPts = ranked[0].optimal.score;
   const rows = ranked.flatMap((s,i)=>{
     const barW = Math.round(s.optimal.score/maxPts*100);
     const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}.`;
     const rid = `clas-row-${i}`;
+    _clasDataByRid[rid] = {s, maxPts, cat: p.categoria};
 
     // Punteggio: "scheda ottimale" o "Σ totale disponibile"
     const scoreCell = `<span style="font-weight:700">${s.optimal.score.toLocaleString('it')}</span>
@@ -3949,12 +3994,19 @@ function _renderClassifica(data, title, content){
     const openBtn = `<button class="btn-open-soc" title="Apri scheda"
         onclick='loadSocFromClassifica(${JSON.stringify(s.cod)})'>📂 Apri</button>`;
 
+    // Badge gap al primo posto
+    const gap = maxPts - s.optimal.score;
+    const gapCell = i===0
+      ? `<span class="clas-gap-zero">—</span>`
+      : `<span class="clas-gap-badge">−${gap.toLocaleString('it')} pt</span>`;
+
     // Riga principale
     const mainRow = `<tr>
       <td class="clas-rank">${medal}</td>
       <td>${s.nome}</td>
       <td class="clas-score">${scoreCell}</td>
       <td style="color:var(--muted);font-size:.71rem;white-space:nowrap">${breakdown}</td>
+      <td>${gapCell}</td>
       <td class="clas-bar-cell"><div class="clas-bar" style="width:${barW}%"></div></td>
       <td style="width:28px">${viewBtn}</td>
       <td style="width:70px">${openBtn}</td>
@@ -3977,13 +4029,14 @@ function _renderClassifica(data, title, content){
           </tr>`;
         }).join('');
       detailRow = `<tr class="clas-detail" id="${rid}">
-        <td colspan="6">
+        <td colspan="7">
           <table class="clas-detail-table">
             <thead><tr style="color:var(--muted);font-size:.67rem">
               <th></th><th>Disciplina</th><th>Atleta</th><th>Prestazione</th><th style="text-align:right">Punti</th>
             </tr></thead>
             <tbody>${detailRows}</tbody>
           </table>
+          <div class="gap-panel" id="gap-panel-${rid}"></div>
         </td>
       </tr>`;
     }
@@ -3995,6 +4048,7 @@ function _renderClassifica(data, title, content){
       <th>#</th><th>Società</th>
       <th title="'CdS ottimale' = scheda calcolata con vincoli (13 ris., min 10 gare, min 2 lanci+salti); 'tot. disponibile' = somma grezza, rigenera il DB per il valore esatto">Punti</th>
       <th style="font-size:.67rem">Corsa · Salti · Lanci · Staff</th>
+      <th title="Distanza in punti dal primo classificato">Gap al 1°</th>
       <th></th><th></th><th></th>
     </tr></thead>
     <tbody>${rows}</tbody>
@@ -4073,14 +4127,89 @@ async function loadSocFromClassifica(cod){
   }
 }
 
-function toggleClasDetail(rid){
+let _clasDataByRid = {};
+
+function _nextLevel(tabEv, curPts) {
+  // Trova il livello immediatamente superiore (minor delta pts) nella tabella
+  let best = null;
+  for (const [perf, pts] of Object.entries(tabEv || {})) {
+    if (pts <= curPts) continue;
+    const delta = pts - curPts;
+    if (!best || delta < best.delta) best = {perf, pts, delta};
+  }
+  return best; // {perf, pts, delta} oppure null
+}
+
+async function _loadGapPanel(rid) {
+  const panel = document.getElementById(`gap-panel-${rid}`);
+  if (!panel || panel.dataset.loaded) return;
+  panel.dataset.loaded = '1';
+
+  const d = _clasDataByRid[rid];
+  if (!d) { panel.style.display='none'; return; }
+  const {s, maxPts, cat} = d;
+  const gap = maxPts - s.optimal.score;
+
+  panel.innerHTML = `<div class="gap-panel-title">Opportunità di miglioramento</div>
+    <div style="font-size:.72rem;color:var(--muted);margin-bottom:.4rem">Caricamento tabelle…</div>`;
+
+  const tabella = await _getTabellaCategoria(cat);
+
+  const sel = (s.optimal.sel || []).filter(r => !r.isStaffetta && r.pts_ok && r.pts > 0);
+  const improvements = [];
+  for (const r of sel) {
+    const tabEv = tabella[r.ev];
+    if (!tabEv) continue;
+    const next = _nextLevel(tabEv, r.pts);
+    if (!next) continue;
+    improvements.push({ev: r.ev, athlete: r.athlete||'', perf_cur: r.perf||'',
+      pts_cur: r.pts, perf_next: next.perf, pts_next: next.pts, delta: next.delta});
+  }
+  improvements.sort((a, b) => b.delta - a.delta);
+
+  if (!improvements.length) {
+    panel.innerHTML = `<div class="gap-panel-title">Opportunità di miglioramento</div>
+      <div style="font-size:.73rem;color:var(--muted)">Nessun livello superiore trovato in tabella per le gare selezionate.</div>`;
+    return;
+  }
+
+  const totRec = improvements.reduce((s,r)=>s+r.delta, 0);
+  const newTot  = s.optimal.score + totRec;
+  const gapStr  = gap > 0 ? `<span style="font-size:.73rem;color:var(--muted)"> — gap al 1°: <strong style="color:#c0392b">−${gap.toLocaleString('it')} pt</strong></span>` : '';
+
+  const trows = improvements.map(r =>
+    `<tr>
+      <td style="font-weight:600">${r.ev}</td>
+      <td style="color:var(--muted);font-size:.72rem">${r.athlete}</td>
+      <td style="font-family:var(--mono)">${r.perf_cur}</td>
+      <td style="font-family:var(--mono)"><span class="gap-perf-arr">→</span>${r.perf_next}</td>
+      <td style="text-align:right"><span class="gap-delta">+${r.delta.toLocaleString('it')}</span></td>
+    </tr>`
+  ).join('');
+
+  panel.innerHTML = `
+    <div class="gap-panel-title">Opportunità di miglioramento${gapStr}</div>
+    <table class="gap-impr-table">
+      <thead><tr>
+        <th>Disciplina</th><th>Atleta</th><th>Prest. attuale</th><th>Target tabella</th>
+        <th style="text-align:right">Guadagno</th>
+      </tr></thead>
+      <tbody>${trows}</tbody>
+      <tfoot><tr class="gap-tot-row">
+        <td colspan="4">Totale recuperabile (tutti i livelli)</td>
+        <td style="text-align:right;font-family:var(--mono)">+${totRec.toLocaleString('it')} pt → ${newTot.toLocaleString('it')}</td>
+      </tr></tfoot>
+    </table>`;
+}
+
+async function toggleClasDetail(rid){
   const row = document.getElementById(rid);
   if (!row) return;
   const isOpen = row.classList.contains('open');
   row.classList.toggle('open', !isOpen);
-  // Aggiorna il bottone +/-
   const btn = row.previousElementSibling?.querySelector('.clas-expand');
   if (btn) btn.textContent = isOpen ? '+' : '−';
+  if (!isOpen) await _loadGapPanel(rid);
 }
 
 // ── CLASSIFICA EXPORT ────────────────────────────────────
