@@ -43,7 +43,7 @@ class CdsUtils:
     @staticmethod
     def athlete_key(name: str) -> str:
         """
-        Estrae una chiave univoca per un atleta (es. cognome) per evitare che superi 
+        Estrae una chiave univoca per un atleta (es. cognome) per evitare che superi
         il limite di gare partecipabili. Usiamo la prima parola del nome.
         
         :param name: Nome completo dell'atleta

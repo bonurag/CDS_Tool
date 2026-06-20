@@ -71,7 +71,7 @@ class CdsOptimizer:
             count = ev_cap.get(ev, 0)
             for _ in range(count):
                 slots_to_fill.append(ev)
-                
+
         if not slots_to_fill:
             if len(sel_staff) == n_sel:
                 return sel_staff, sum(r.get('pts') or 0 for r in sel_staff)
@@ -80,10 +80,10 @@ class CdsOptimizer:
         # Raggruppa preferendo gli slot con meno candidati (più rigidi da piazzare per l'algoritmo)
         counts = {ev: len(by_ev.get(ev, [])) for ev in set(slots_to_fill)}
         slots_to_fill.sort(key=lambda ev: (counts.get(ev, 0), ev))
-        
+
         best_score = -1
         best_sel = None
-        
+
         # Max_rem: vettore punteggi massimi rimanenti per Branch and Bound. Taglia i rami svantaggiosi.
         max_rem = [0] * len(slots_to_fill)
         for i in range(len(slots_to_fill)-1, -1, -1):
@@ -108,10 +108,10 @@ class CdsOptimizer:
             # Pruning
             if current_score + max_rem[slot_idx] <= best_score:
                 return
-                
+
             ev = slots_to_fill[slot_idx]
             cands = ev_cands[ev]
-            
+
             # Rottura di simmetria per slot doppi così da dimezzare prove ridondanti identiche
             start_idx = 0
             if slot_idx > 0 and slots_to_fill[slot_idx] == slots_to_fill[slot_idx-1]:
@@ -121,22 +121,22 @@ class CdsOptimizer:
                 r = cands[idx]
                 rid = id(r)
                 if rid in used_ids: continue
-                    
+
                 ak = CdsUtils.athlete_key(r.get('athlete', ''))
                 if ac_t.get(ak, 0) >= 2: continue
                 if ac_i.get(ak, 0) >= max_athl_ind: continue
-                
+
                 pts = r.get('pts') or 0
-                
+
                 # Applica stato nodo
                 ac_t[ak] = ac_t.get(ak, 0) + 1
                 ac_i[ak] = ac_i.get(ak, 0) + 1
                 used_ids.add(rid)
                 current_sel.append(r)
-                
+
                 # Branch
                 dfs(slot_idx + 1, current_score + pts, current_sel, ac_t, ac_i, used_ids, idx)
-                
+
                 # Rollback stato nodo (backtrack)
                 current_sel.pop()
                 used_ids.remove(rid)
@@ -144,7 +144,7 @@ class CdsOptimizer:
                 ac_i[ak] -= 1
 
         dfs(0, 0, [], ac_total, {}, set(), -1)
-        
+
         if best_sel is None: return None, -1
         final_sel = sel_staff + best_sel
         return final_sel, sum(r.get('pts') or 0 for r in final_sel)
@@ -226,7 +226,7 @@ class CdsOptimizer:
         by_ev = {}
         for r in ind:
             by_ev.setdefault(r['ev'], []).append(r)
-        
+
         for ev in by_ev:
             by_ev[ev].sort(key=lambda r: r.get('pts') or 0, reverse=True)
             by_ev[ev] = by_ev[ev][:25]

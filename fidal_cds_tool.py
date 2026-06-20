@@ -7,11 +7,16 @@ Poi apri http://localhost:5001
 from flask import Flask, jsonify, request, Response, stream_with_context
 import requests
 from bs4 import BeautifulSoup
-import re, sys, threading, time, webbrowser, json, os
-from itertools import combinations
+import re
+import sys
+import threading
+import time
+import webbrowser
+import json
+import os
 from core.cds_utils import CdsUtils
 from core.cds_optimizer import CdsOptimizer
-from core.cds_manual import read_manual, write_manual, MANUAL_FILE, _data_dir
+from core.cds_manual import read_manual, write_manual, _data_dir
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -382,7 +387,6 @@ def api_proiezione():
 
 @app.route('/api/ottimizza', methods=['POST'])
 def api_ottimizza():
-    from core.cds_optimizer import CdsOptimizer
     try:
         payload = request.get_json()
         results = list(payload.get('data', []))
@@ -420,7 +424,8 @@ def api_ottimizza():
             'staff_scores': staff_scores,
         })
     except Exception as e:
-        import traceback; traceback.print_exc()
+        import traceback
+        traceback.print_exc()
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
@@ -435,7 +440,8 @@ def chrome_devtools():
 @app.route('/api/fidal_status')
 def api_fidal_status():
     """Verifica raggiungibilità server FIDAL. Chiamata dal frontend come health-check."""
-    import urllib.request, time
+    import urllib.request
+    import time
     try:
         t0 = time.time()
         req = urllib.request.Request(
@@ -550,7 +556,8 @@ def api_manual_template_csv():
 
 @app.route('/api/manual/import_csv', methods=['POST'])
 def api_manual_import_csv():
-    import csv, io
+    import csv
+    import io
     try:
         if 'file' not in request.files:
             return jsonify({'ok': False, 'error': 'Nessun file ricevuto'})
@@ -732,7 +739,8 @@ def api_reoptimize_soc():
             'manual_count': len(soc_manual),
         })
     except Exception as e:
-        import traceback; traceback.print_exc()
+        import traceback
+        traceback.print_exc()
         return jsonify({'ok': False, 'error': str(e)})
 
 
@@ -842,7 +850,6 @@ def _compute_optimal_best(results, cat):
     eleggibile più una baseline senza staffette. Garantisce il vero ottimale globale:
     una singola chiamata multi-combo lascerebbe il B&B pottare rami superiori dopo
     aver fissato best_total sul primo combo valutato."""
-    from core.cds_optimizer import CdsOptimizer
     ind_results    = [r for r in results if not r.get('isStaffetta')]
     staff_eligible = [r for r in results if r.get('isStaffetta') and r.get('pts_ok')]
 
@@ -899,7 +906,7 @@ def api_proiezione_build():
             log.flush()
 
         try:
-            _log(f'=== Build proiezione CdS ===')
+            _log('=== Build proiezione CdS ===')
             _log(f'Anno: {anno}  Tipo: {tipo}  Sesso: {sesso}  Categoria: {cat}  Regione: {reg}')
             _log(f'Nazionalità: {naz}  Vento: {vento}')
             _log(f'Avviato: {time.strftime("%Y-%m-%d %H:%M:%S")}')
@@ -929,7 +936,8 @@ def api_proiezione_build():
             societies = _fetch_society_list(reg)
             if not societies:
                 _log(f'ERRORE: nessuna società trovata per {reg}')
-                yield _ev({'type': 'error', 'msg': f'Nessuna società trovata per {reg}'}); return
+                yield _ev({'type': 'error', 'msg': f'Nessuna società trovata per {reg}'})
+                return
             total = len(societies)
             _log(f'Società trovate: {total}')
             _log()

@@ -4,7 +4,9 @@ Persistenza delle schede manuali (manual_entries.json).
 Il file viene salvato nella stessa directory dell'eseguibile
 (compatibile con la modalità PyInstaller).
 """
-import os, sys, json
+import os
+import sys
+import json
 
 
 def _data_dir() -> str:
