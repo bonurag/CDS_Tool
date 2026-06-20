@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.env
+*.log
+app_out.txt
+fidal_response.html
+diag*.py
+
+# PyInstaller build artifacts
+build/
+dist/
+
+# User data (generated at runtime)
+manual_entries.json
+# Cache proiezione regionale (ogni utente la rigenera con il build)
+proiezione_*.json
+# Log di build (generati a runtime)
+logs/
+
+# IDE/tool config
+.claude/

@@ -1,0 +1,133 @@
+async function computeOptimal(){
+  const missing=activeAll().filter(r=>userPts[r.id]===undefined&&!r.pts_ok);
+  if (missing.length>0){
+    setNoteEst(`⚠ ${missing.length} risultat${missing.length===1?'o':'i'} senza punteggio — inserisci i punti FIDAL per tutti prima di calcolare.`, true);
+    return;
+  }
+  setNoteEst('');
+
+  const _lbar  = document.getElementById('loading-bar-track');
+  const _lfill = document.getElementById('loading-bar-fill');
+  const _lsub  = document.getElementById('loading-sub');
+  const _llog  = document.getElementById('opt-log');
+
+  // Mostra overlay con barra determinata
+  _setLoadingMsg('Calcolo punteggio ottimale…');
+  if (_lbar)  _lbar.style.display = '';
+  if (_lfill) { _lfill.classList.remove('indeterminate'); _lfill.style.width = '0%'; }
+  if (_llog)  { _llog.style.display = ''; _llog.innerHTML = ''; }
+  document.getElementById('loading').classList.remove('hidden');
+  await new Promise(r => setTimeout(r, 30)); // lascia al browser il tempo di renderizzare
+
+  const _startTs = Date.now();
+  function _elapsed(){ return ((Date.now()-_startTs)/1000).toFixed(1)+'s'; }
+
+  function setProgress(pct, stepMsg){
+    if (_lfill) _lfill.style.width = Math.min(100, Math.round(pct)) + '%';
+    _setLoadingMsg(`Calcolo punteggio ottimale… ${Math.round(pct)}%  ⏱ ${_elapsed()}`);
+    if (_lsub) _lsub.textContent = stepMsg;
+    if (_llog && stepMsg) {
+      _llog.innerHTML += `<div>[${_elapsed()}] ${stepMsg}</div>`;
+      _llog.scrollTop = _llog.scrollHeight;
+    }
+  }
+
+  let _savedALL = null; // riservato per usi futuri
+
+  try {
+    // Raggruppa staffette CdS per tipo, tieni tutte le entry ordinate per punti.
+    // Il prodotto cartesiano (nessuna | una qualsiasi entry per tipo) garantisce che
+    // anche staffette con atlete diverse vengano valutate rispetto alle gare individuali.
+    const _cdsProg=CDS_PROGRAMS[currentCategoria];
+    const _rawStaff=activeAll().filter(r=>r.isStaffetta&&(!_cdsProg||_cdsProg(r.ev)));
+    const _byEvType={};
+    for (const r of _rawStaff){
+      (_byEvType[r.ev]=_byEvType[r.ev]||[]).push(r);
+    }
+    for (const ev of Object.keys(_byEvType)){
+      _byEvType[ev].sort((a,b)=>pts(b)-pts(a));
+    }
+    const staffGroups=Object.values(_byEvType); // [[r1a,r1b,...],[r2a,...],...]
+    const n=staffGroups.length;
+    const evList=[...new Set(activeAll().filter(r=>!r.isStaffetta).map(r=>r.ev))];
+    const C=getC();
+    const maxD = isProiezione ? 1 : C.nSel-C.minEv;
+    const nEvs=evList.length;
+    const totalCombos=staffGroups.reduce((acc,g)=>acc*(1+g.length),1);
+    const totalSteps = totalCombos + 2*n + 1;
+    let doneSteps = 0;
+
+    // Stima combinazioni per info
+    let estCombs=0;
+    for(let nEv=C.minEv;nEv<=Math.min(C.nSel,nEvs);nEv++){
+      const nD=C.nSel-nEv; if(nD>maxD) continue;
+      let c=1; for(let i=0;i<Math.min(nEv,nEvs-nEv);i++) c=c*(nEvs-i)/(i+1);
+      estCombs+=Math.round(c);
+    }
+    console.log(`[Optimizer] ALL=${ALL.length} risultati · ${nEvs} gare individuali · staffette CdS: [${staffGroups.map(g=>g[0].ev).join(', ')||'nessuna'}] (${totalCombos} conf. staffette) · ~${estCombs.toLocaleString('it')} combinazioni gare · maxD=${maxD}`);
+    setProgress(0, `Inizio · ${nEvs} gare · ~${estCombs.toLocaleString('it')} combinazioni · ${totalCombos} conf. staffette`);
+    await new Promise(r => setTimeout(r, 0));
+
+    let bestTotal=-1,bestSel=null;
+    staffAnalysis=[];
+    topCombinations=[];
+
+    // Fase 1 — prodotto cartesiano staffette (nessuna | una entry per tipo)
+    let comboIdx=0;
+    for (const combo of _staffCombos(staffGroups)){
+      const incl=combo.filter(Boolean);
+      const staffLabel = incl.length ? incl.map(r=>r.ev).join(' + ') : 'nessuna staffetta';
+      setProgress(doneSteps/totalSteps*100,
+        `Conf. staffette ${comboIdx+1}/${totalCombos}: ${staffLabel}${bestTotal>0?' · miglior Σ '+bestTotal:''}…`);
+      await new Promise(r => setTimeout(r, 0));
+      const {total,sel}=searchOptimal(incl, maxD);
+      if (sel&&sel.length===C.nSel){
+        topCombinations.push({total,sel:[...sel],inclStaff:staffLabel});
+        if (total>bestTotal){
+          bestTotal=total;bestSel=sel;
+          console.log(`[Optimizer] Nuovo miglior score: ${total} (combo ${comboIdx}: ${staffLabel})`);
+        }
+      }
+      doneSteps++;
+      comboIdx++;
+    }
+    topCombinations.sort((a,b)=>b.total-a.total);
+
+    // Fase 2 — analisi per ogni tipo di staffetta: con (entry migliore) vs senza
+    for (const [si, staffOpts] of staffGroups.entries()){
+      const st=staffOpts[0];
+      setProgress(doneSteps/totalSteps*100,
+        `Analisi staffetta ${si+1}/${n}: ${st.ev}…`);
+      await new Promise(r => setTimeout(r, 0));
+      const {total:tC}=searchOptimal([st], maxD);
+      doneSteps++;
+      await new Promise(r => setTimeout(r, 0));
+      const {total:tS}=searchOptimal([], maxD);
+      doneSteps++;
+      const inOpt=bestSel?staffOpts.some(opt=>bestSel.some(r=>r.id===opt.id)):false;
+      staffAnalysis.push({staff:st,tCon:tC,tSenza:tS,delta:tC-tS,inOpt});
+    }
+
+    console.log(`[Optimizer] Completato. Miglior score: ${bestTotal}. Top combinazioni:`, topCombinations.slice(0,3).map(c=>({total:c.total,staff:c.inclStaff})));
+    setProgress(99, 'Rendering risultati…');
+    await new Promise(r => setTimeout(r, 0));
+
+    selectedIds.clear();
+    if (!bestSel){
+      setNoteEst(`⚠ Impossibile trovare ${C.nSel} risultati con ≥${C.minEv} gare e tutti i vincoli soddisfatti.`+buildOptDiagnostic(), true);
+    } else {
+      setNoteEst('');
+      bestSel.forEach(r=>selectedIds.add(r.id));
+    }
+    renderProspetto(); renderAll(); updateConstraints(); renderAthleteTracker();
+    renderStaffettaAnalysis();
+  } finally {
+    document.getElementById('loading').classList.add('hidden');
+    _setLoadingMsg('Caricamento dati FIDAL…');
+    if (_lbar)  _lbar.style.display='none';
+    if (_lfill) { _lfill.classList.add('indeterminate'); _lfill.style.width='40%'; }
+    if (_lsub)  _lsub.textContent='';
+    if (_llog)  { _llog.style.display='none'; _llog.innerHTML=''; }
+  }
+}
+
