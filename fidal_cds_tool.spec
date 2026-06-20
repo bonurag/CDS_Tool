@@ -11,6 +11,8 @@ a = Analysis(
         ('data/Ragazzi.json', 'data'),
         ('core/cds_utils.py', 'core'),
         ('core/cds_optimizer.py', 'core'),
+        ('templates', 'templates'),
+        ('static', 'static'),
     ],
     hiddenimports=[
         'flask',

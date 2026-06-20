@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FIDAL CdS Tool</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<!-- LOADING OVERLAY -->
+<div class="loading-overlay hidden" id="loading">
+  <div class="spinner"></div>
+  <p id="loading-msg">Caricamento dati FIDAL…</p>
+  <div class="loading-bar-track" id="loading-bar-track" style="display:none">
+    <div class="loading-bar-fill indeterminate" id="loading-bar-fill"></div>
+  </div>
+  <p id="loading-sub" style="font-size:.72rem;color:rgba(255,255,255,.55);font-weight:400;margin-top:-.5rem"></p>
+  <div id="opt-log" style="display:none;font-size:.65rem;color:rgba(255,255,255,.4);
+    max-height:72px;overflow-y:auto;text-align:left;width:300px;line-height:1.7;
+    border-top:1px solid rgba(255,255,255,.12);padding-top:.4rem;margin-top:-.2rem"></div>
+</div>
+
+<!-- ══════════════ SCREEN 1: FORM ══════════════ -->
+<div class="screen active" id="scr-form">
+  <div class="hbar">
+    <div class="hbadge">F</div>
+    <div>
+      <div class="htitle">FIDAL CdS Tool</div>
+      <div class="hsub">Scheda Campionato di Società — Fase Provinciale</div>
+    </div>
+  </div>
+
+  <div class="form-wrap">
+    <div class="form-card">
+      <h2>Parametri ricerca graduatorie</h2>
+      <p class="sub">Inserisci i parametri per caricare i risultati della società dalla banca dati FIDAL.</p>
+
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Anno</label>
+          <select id="f-anno">
+            <option value="2026">2026</option>
+            <option value="2025">2025</option>
+            <option value="2024">2024</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Tipo attività</label>
+          <select id="f-tipo">
+            <option value="P">Outdoor (Pista/Campo)</option>
+            <option value="I">Indoor (Pista coperta)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Sesso</label>
+          <select id="f-sesso" onchange="updateCatOptions()">
+            <option value="F">Femminile</option>
+            <option value="M">Maschile</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Categoria</label>
+          <select id="f-cat"><!-- popolato da updateCatOptions() --></select>
+        </div>
+
+        <div class="form-group">
+          <label>Regione</label>
+          <select id="f-reg">
+            <option value="LOM">Lombardia</option>
+            <option value="PIE">Piemonte</option>
+            <option value="VEN">Veneto</option>
+            <option value="EMR">Emilia-Romagna</option>
+            <option value="TOS">Toscana</option>
+            <option value="LAZ">Lazio</option>
+            <option value="CAM">Campania</option>
+            <option value="SIC">Sicilia</option>
+            <option value="SAR">Sardegna</option>
+            <option value="FVG">Friuli VG</option>
+            <option value="LIG">Liguria</option>
+            <option value="MAR">Marche</option>
+            <option value="UMB">Umbria</option>
+            <option value="ABR">Abruzzo</option>
+            <option value="BAS">Basilicata</option>
+            <option value="CAL">Calabria</option>
+            <option value="MOL">Molise</option>
+            <option value="PUG">Puglia</option>
+            <option value="TAA">Trentino AA</option>
+            <option value="VDA">Valle d'Aosta</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Nazionalità</label>
+          <select id="f-naz">
+            <option value="0" selected>Tutti</option>
+            <option value="1">Italiani e stranieri</option>
+            <option value="2">Solo italiani</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Vento</label>
+          <select id="f-vento">
+            <option value="2" selected>Tutti</option>
+            <option value="0">Non ventosi</option>
+            <option value="1">Con vento</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Limite risultati</label>
+          <select id="f-limite">
+            <option value="100">100</option>
+            <option value="50">50</option>
+            <option value="30">30</option>
+            <option value="20">20</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Società (cerca per nome)</label>
+          <input id="f-societa-name" type="text" list="societa-datalist"
+            placeholder="Cerca per nome…" autocomplete="off"
+            oninput="onSocietaNomeInput()">
+          <datalist id="societa-datalist"></datalist>
+          <span id="societa-status" style="font-size:.67rem;color:var(--muted);
+            margin-top:.2rem;display:block"></span>
+        </div>
+        <div class="form-group">
+          <label>Codice Società FIDAL</label>
+          <input id="f-societa" type="text" placeholder="es. BS318"
+            style="text-transform:uppercase"
+            oninput="onSocietaCodiceInput()">
+        </div>
+      </div>
+
+      <div class="url-preview" id="url-preview">—</div>
+      <div class="error-msg" id="form-error" style="display:none"></div>
+
+      <!-- Indicatore connessione FIDAL -->
+      <div class="fidal-status">
+        <span class="fidal-led idle" id="fidal-led"></span>
+        <span id="fidal-status-txt">Verifica connessione FIDAL…</span>
+        <button id="fidal-retry-btn" onclick="checkFidalConnection()"
+          style="display:none;font-size:.7rem;padding:.1rem .45rem;margin-left:.3rem;
+                 border:1px solid var(--muted);border-radius:4px;background:transparent;
+                 color:var(--muted);cursor:pointer">↺ Riprova</button>
+      </div>
+
+      <button class="btn-primary" id="btn-fetch-fidal" onclick="fetchData()" disabled>⚡ Carica Graduatorie FIDAL</button>
+      <button class="btn-secondary" id="btn-fetch-proj" onclick="fetchProiezione()" disabled>📊 Proiezione regionale (da cache)</button>
+      <button class="btn-build" id="btn-build-proj" onclick="startBuildProiezione()" disabled>⚙ Costruisci / Aggiorna DB Regionale (analizza tutte le società)</button>
+      <button class="btn-csv-form" onclick="openCsvModal(true)">📂 Importa risultati da CSV (modalità manuale — senza caricare graduatorie FIDAL)</button>
+      <!-- Area progress build -->
+      <div class="build-area" id="build-area" style="display:none">
+        <h4>
+          <span id="build-area-title">Costruzione database regionale</span>
+          <button class="btn-mcancel" style="font-size:.7rem" onclick="cancelBuild()">✕ Annulla</button>
+        </h4>
+        <div class="build-progress-track">
+          <div class="build-progress-fill" id="build-fill"></div>
+        </div>
+        <div class="build-status" id="build-status">In attesa...</div>
+        <div class="build-log" id="build-log"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ SCREEN 1b: CLASSIFICA REGIONALE ══════════════ -->
+<div class="screen" id="scr-classifica">
+  <div class="hbar">
+    <div class="hbadge">AC</div>
+    <div>
+      <div class="htitle" id="clas-screen-title">Proiezione Regionale</div>
+      <div class="hsub" id="clas-screen-sub">—</div>
+    </div>
+    <div class="hmeta">
+      <span class="tag" id="clas-screen-ts"></span>
+    </div>
+    <button class="btn-refresh-cache" onclick="fetchProiezione(true)" style="margin-right:.5rem">🔄 Aggiorna dati</button>
+    <button class="btn-pdf" onclick="downloadClassificaCSV()" style="margin-right:.4rem">⬇ CSV</button>
+    <button class="btn-pdf" onclick="printClassificaPDF()" style="margin-right:.5rem">⬇ Stampa / PDF</button>
+    <button class="btn-back" onclick="goBack()">← Nuova ricerca</button>
+  </div>
+  <div style="padding:1.5rem 2rem">
+    <div id="clas-screen-content"><div style="color:var(--muted);font-size:.85rem">Caricamento…</div></div>
+  </div>
+</div>
+
+<!-- ══════════════ SCREEN 2: TOOL ══════════════ -->
+<div class="screen" id="scr-tool">
+  <!-- Header -->
+  <div class="hbar">
+    <div class="hbadge">AC</div>
+    <div>
+      <div class="htitle" id="tool-title">ATL. CHIARI 1964 LIB.</div>
+      <div class="hsub" id="tool-sub">Scheda CdS · Outdoor 2026</div>
+    </div>
+    <div class="hmeta">
+      <span class="tag" id="tag-cat">—</span>
+      <span class="tag acc" id="tag-tot">Tot. — pt</span>
+    </div>
+    <button class="btn-back" id="btn-to-classifica" onclick="goToClassifica()"
+      style="display:none">🏆 Classifica</button>
+    <button class="btn-back" onclick="goBack()">← Nuova ricerca</button>
+  </div>
+
+  <!-- Proiezione banner -->
+  <div class="proiezione-bar" id="proiezione-bar" style="display:none">
+    <span>📊 <strong>Proiezione Regionale</strong> — punteggio teorico massimo (top atleti per disciplina, max 1 doppiatura).</span>
+    <span id="proiezione-ts" style="font-size:.75rem;opacity:.8"></span>
+    <span style="margin-left:auto"></span>
+    <button class="btn-refresh-cache" onclick="fetchProiezione(true)">🔄 Aggiorna dati</button>
+    <button class="btn-refresh-cache" onclick="computeClassifica()">🏆 Classifica</button>
+  </div>
+
+  <!-- Classifica regionale -->
+  <div class="clas-panel" id="clas-panel" style="display:none">
+    <h3 id="clas-title">🏆 Classifica Regionale</h3>
+    <div id="clas-content"></div>
+  </div>
+
+  <!-- Constraints -->
+  <div class="cbar">
+    <div class="cbox" id="c-n">   <span>📋</span><span id="c-n-t">0/13 risultati</span></div>
+    <div class="cbox" id="c-ev">  <span>📊</span><span id="c-ev-t">0/10 gare</span></div>
+    <div class="cbox" id="c-la">  <span>⭕</span><span id="c-la-t">0/2 lanci</span></div>
+    <div class="cbox" id="c-sa">  <span>↑</span><span id="c-sa-t">0/2 salti</span></div>
+    <div class="cbox" id="c-at">  <span>👤</span><span id="c-at-t">Vincoli OK</span></div>
+  </div>
+
+  <!-- Global Filters Panel -->
+  <div class="gfilter-panel" id="gfilter-panel">
+    <div class="gfilter-section">
+      <span class="gfilter-label">🚫 Atleti non disponibili:</span>
+      <input id="unavail-input" class="gfilter-input" list="unavail-list"
+        placeholder="Cerca atleta…" style="min-width:160px"
+        onkeydown="if(event.key==='Enter')addUnavailFromInput()">
+      <datalist id="unavail-list"></datalist>
+      <button class="btn-gfilter-add" onclick="addUnavailFromInput()">Escludi</button>
+      <div id="unavail-chips" style="display:flex;gap:.3rem;flex-wrap:wrap"></div>
+    </div>
+    <div class="gfilter-section">
+      <span class="gfilter-label">📅 Solo prestazioni dal:</span>
+      <input id="date-filter-input" class="gfilter-input" type="date"
+        style="min-width:145px" onchange="onDateFilterChange()">
+      <button class="btn-mcancel" id="date-filter-clear"
+        style="font-size:.72rem;padding:.22rem .65rem;display:none"
+        onclick="clearDateFilter()">✕ Azzera</button>
+      <span id="date-filter-count" style="font-size:.72rem;color:var(--muted)"></span>
+    </div>
+  </div>
+
+  <!-- Saved manual entries reload bar -->
+  <div class="manual-reload-bar" id="manual-reload-bar" style="display:none">
+    <span>💾 <strong id="reload-count">0</strong> risultati manuali salvati per questa categoria — vuoi ricaricarli?</span>
+    <button class="btn-mok" style="font-size:.74rem;padding:.22rem .65rem" onclick="reloadManualEntries()">⟳ Ricarica</button>
+    <button class="btn-mcancel" style="font-size:.74rem" onclick="dismissReloadBar()">✕ Ignora</button>
+  </div>
+
+  <!-- Event filter panel -->
+  <div class="ev-filter-panel" id="ev-filter-panel" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">
+      <h3 style="margin:0">🏅 Gare nel programma CdS — clicca per escludere</h3>
+      <div style="display:flex;gap:.4rem">
+        <button class="btn-mok" id="btn-preset-cds" style="font-size:.72rem;padding:.22rem .65rem;display:none" onclick="applyPresetCds()">⚡ Preset CdS</button>
+        <button class="btn-mcancel" style="font-size:.72rem;padding:.22rem .65rem" onclick="resetEvFilter()">✕ Includi tutto</button>
+      </div>
+    </div>
+    <div class="ev-chips-row" id="ev-chips"></div>
+  </div>
+
+  <!-- Staffetta Analysis -->
+  <div class="staff-panel" id="staff-panel" style="display:none">
+    <h3>⚡ Analisi Staffette</h3>
+    <div class="staff-cards" id="staff-cards"></div>
+  </div>
+
+  <!-- Auto-options bar -->
+  <div class="auto-opts">
+    <span style="font-weight:600;color:var(--muted);font-size:.7rem;letter-spacing:.04em;text-transform:uppercase">Auto</span>
+    <label title="Carica automaticamente i risultati manuali salvati per questa società all'apertura">
+      <input type="checkbox" id="opt-auto-manual" onchange="setAutoOpt('manual',this.checked)">
+      Carica manuali
+    </label>
+    <label title="Applica automaticamente il filtro disciplina CdS all'apertura">
+      <input type="checkbox" id="opt-auto-preset" onchange="setAutoOpt('preset',this.checked)">
+      Filtro CdS
+    </label>
+  </div>
+
+  <!-- Totals bar -->
+  <div class="totbar">
+    <div class="tstat"><span class="val" id="tot-pts">0</span><span class="lbl">Punti</span></div>
+    <div class="tstat"><span class="val" id="tot-n">0</span><span class="lbl">Selezionati</span></div>
+    <div class="tstat"><span class="val" id="tot-ev">0</span><span class="lbl">Gare</span></div>
+    <span class="note-est" id="note-est">Inserisci i punti FIDAL per ogni risultato, poi usa Calcola Ottimale</span>
+    <button class="btn-clr" onclick="clearAll()">✕ Svuota</button>
+    <button class="btn-pdf" onclick="downloadCSV()">⬇ CSV</button>
+    <button class="btn-pdf" onclick="printPDF()">⬇ Stampa / PDF</button>
+    <button class="btn-opt" onclick="computeOptimal()">⚡ Calcola Ottimale</button>
+  </div>
+  <div id="calcola-err" style="display:none"></div>
+
+  <div class="main">
+
+    <!-- PROSPETTO -->
+    <div class="card">
+      <div class="card-head">
+        <h2 id="pros-title">Prospetto Scheda</h2>
+        <span class="badge-n" id="sel-n">0</span>
+      </div>
+      <!-- Avviso pareggi punteggio -->
+      <div class="tie-panel" id="tie-panel" style="display:none"></div>
+      <div style="overflow-x:auto">
+        <table class="tbl">
+          <thead><tr>
+            <th>#</th><th>Tipo</th><th>Disciplina</th><th>Atleta/e</th><th>Anno</th>
+            <th>Prest.</th><th>Piazz.</th><th>Città</th><th>Data</th>
+            <th style="text-align:right">Punti FIDAL</th><th></th>
+          </tr></thead>
+          <tbody id="pros-body">
+            <tr><td colspan="9" style="padding:2rem;text-align:center;color:var(--muted)">
+              Clicca <strong>⚡ Calcola Ottimale</strong> o seleziona manualmente dalla tabella sotto.
+            </td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="padding:.45rem 1rem .65rem;display:flex;justify-content:flex-end;
+                  gap:.75rem;align-items:center;border-top:1px solid var(--border)">
+        <span style="font-size:.75rem;color:var(--muted)">Totale scheda:</span>
+        <span class="grand-total" id="grand-total">0</span>
+      </div>
+    </div>
+
+    <!-- TUTTI I RISULTATI -->
+    <div class="card">
+      <div class="card-head">
+        <h2>Tutti i risultati disponibili</h2>
+        <span class="badge-n" id="all-n">—</span>
+      </div>
+
+      <!-- Athlete tracker -->
+      <div class="atl-tracker" id="atl-tracker"></div>
+
+      <!-- Filters -->
+      <div class="frow">
+        <select id="f-type" onchange="renderAll()">
+          <option value="">Tutti i tipi</option>
+          <option value="corsa">Corsa</option>
+          <option value="ostacoli">Ostacoli</option>
+          <option value="salto">Salti</option>
+          <option value="lancio">Lanci</option>
+          <option value="staffetta">Staffetta</option>
+        </select>
+        <input type="text" id="f-name" placeholder="Cerca atleta…" oninput="renderAll()">
+        <select id="f-ev-filter" onchange="renderAll()">
+          <option value="">Tutte le discipline</option>
+        </select>
+        <span style="font-size:.72rem;color:var(--muted);margin-left:auto">
+          🟢 Selezionato &nbsp;|&nbsp; 🟡 Parzialmente disponibile &nbsp;|&nbsp; 🔴 Bloccato
+        </span>
+      </div>
+
+      <div style="overflow-x:auto">
+        <table class="tbl">
+          <thead><tr>
+            <th></th>
+            <th onclick="sortAll(0)">Tipo ⇅</th>
+            <th onclick="sortAll(1)">Disciplina ⇅</th>
+            <th onclick="sortAll(2)">Atleta ⇅</th>
+            <th>Anno</th>
+            <th onclick="sortAll(3)">Prest. ⇅</th>
+            <th>Vento</th>
+            <th onclick="sortAll(4)">Piazz. ⇅</th>
+            <th>Città</th>
+            <th>Data</th>
+            <th onclick="sortAll(5)" style="text-align:right">Pt FIDAL ⇅</th>
+            <th></th>
+          </tr></thead>
+          <tbody id="all-body"></tbody>
+        </table>
+      </div>
+      <!-- Manual entry bar -->
+      <div class="manual-bar">
+        <button class="btn-add-manual" onclick="toggleManualForm()">➕ Aggiungi risultato manuale</button>
+        <button class="btn-import-csv" onclick="openCsvModal()">📂 Importa da CSV</button>
+        <span style="font-size:.72rem;color:var(--muted)">per staffette non presenti o gare mancanti</span>
+      </div>
+      <div id="manual-form" style="display:none">
+        <div class="manual-form-box">
+          <div class="mfg">
+            <div class="fg-sm">
+              <label>Gara *</label>
+              <input id="m-ev" list="m-ev-list" placeholder="es. Staffetta 4×100" oninput="onManualEvInput()">
+              <datalist id="m-ev-list"></datalist>
+            </div>
+            <div class="fg-sm">
+              <label>Tipo</label>
+              <select id="m-tipo">
+                <option value="corsa">Corsa</option>
+                <option value="ostacoli">Ostacoli</option>
+                <option value="salto">Salto</option>
+                <option value="lancio">Lancio</option>
+                <option value="staffetta">Staffetta</option>
+              </select>
+            </div>
+            <div class="fg-sm">
+              <label>Prestazione *</label>
+              <input id="m-perf" placeholder="es. 48.50 o 1:52.30">
+            </div>
+          </div>
+          <div class="mfg2">
+            <div class="fg-sm">
+              <label>Atleta/e * <span style="font-weight:400;text-transform:none">(staffetta: nomi separati da virgola)</span></label>
+              <input id="m-athl" placeholder="es. ROSSI L., BIANCHI M., VERDI G., NERI A.">
+            </div>
+            <div class="fg-sm">
+              <label>Punti FIDAL</label>
+              <input id="m-pts" type="number" min="0" placeholder="(lascia vuoto per inserire dopo)">
+            </div>
+          </div>
+          <div class="mfg2">
+            <div class="fg-sm">
+              <label>Città</label>
+              <input id="m-citta" placeholder="es. Brescia">
+            </div>
+            <div class="fg-sm">
+              <label>Data</label>
+              <input id="m-data" placeholder="es. 15/05/2026">
+            </div>
+          </div>
+          <button class="btn-mok" onclick="submitManual()">✔ Aggiungi</button>
+          <button class="btn-mcancel" onclick="toggleManualForm()">Annulla</button>
+          <span id="manual-err" style="color:var(--red);font-size:.8rem;margin-left:.75rem"></span>
+        </div>
+      </div>
+
+      <div class="legenda">
+        <span>⚠ Max 2 risultati per gara (staffetta esclusa)</span>
+        <span>⚠ Ogni atleta max 2 volte (staffetta conta come 1)</span>
+        <span>⚠ Obbligatori: ≥2 lanci diversi + ≥2 salti diversi · min 10 gare</span>
+      </div>
+    </div>
+
+  </div><!-- /main -->
+
+</div><!-- /scr-tool -->
+
+<!-- CSV Import Modal — fuori da tutti gli .screen, visibile da qualsiasi schermata -->
+<div class="csv-overlay" id="csv-overlay" style="display:none" onclick="if(event.target===this)closeCsvModal()">
+  <div class="csv-modal" role="dialog" aria-labelledby="csv-modal-title">
+    <div class="csv-modal-head">
+      <h3 id="csv-modal-title">Importa risultati da file CSV</h3>
+      <button class="csv-modal-close" onclick="closeCsvModal()" title="Chiudi">&#x2715;</button>
+    </div>
+    <div class="csv-modal-body">
+
+      <!-- nota contestuale: visibile solo quando aperto dal form screen -->
+      <div class="csv-form-note" id="csv-form-note" style="display:none">
+        <strong>Modalità manuale:</strong> i parametri compilati nel form (categoria, società, anno…) verranno usati per aprire la schermata di lavoro.
+        Dopo l&apos;importazione si aprirà automaticamente il tool con i soli risultati caricati da file.
+      </div>
+
+      <div class="csv-section">
+        <h4>Come funziona</h4>
+        <p style="font-size:.82rem;margin:.3rem 0 .6rem">Prepara un file <strong>.csv</strong> con una riga di intestazione e una riga per ogni risultato da importare.
+        I record validi vengono aggiunti come inserimenti manuali e salvati in modo persistente.
+        Le righe con errori vengono segnalate ma <em>non</em> bloccano l&apos;importazione delle righe valide.</p>
+      </div>
+
+      <div class="csv-section">
+        <h4>Colonne richieste e valori ammessi</h4>
+        <table class="csv-col-table">
+          <thead><tr><th>Colonna</th><th>Obbl.</th><th>Valori ammessi / formato</th><th>Esempio</th></tr></thead>
+          <tbody>
+            <tr><td><code>categoria</code></td><td class="required">SI</td><td>CF &bull; CM &bull; RF &bull; RM</td><td>CF</td></tr>
+            <tr><td><code>gara</code></td><td class="required">SI</td><td>Nome disciplina dalla lista per la categoria (case-insensitive) &mdash; <button type="button" onclick="toggleDisciplineList()" style="background:none;border:none;color:var(--blue);cursor:pointer;font-size:.78rem;padding:0;text-decoration:underline" id="csv-disc-toggle">mostra lista ▾</button></td><td>300 piani</td></tr>
+            <tr><td><code>tipo</code></td><td class="required">SI</td><td>corsa &bull; ostacoli &bull; salto &bull; lancio &bull; staffetta</td><td>corsa</td></tr>
+            <tr><td><code>prestazione</code></td><td class="required">SI</td><td>Formato libero: secondi, m:ss.cc, metri</td><td>42.10 &nbsp;/&nbsp; 1:52.30 &nbsp;/&nbsp; 13.45</td></tr>
+            <tr><td><code>atleta</code></td><td class="required">SI</td><td>Nome atleta. Per staffetta: nomi separati da <code>/</code> o <code>,</code></td><td>ROSSI L. / BIANCHI M. / VERDI G. / NERI A.</td></tr>
+            <tr><td><code>punti</code></td><td class="optional">no</td><td>Intero &ge; 0. Lasciare vuoto se sconosciuto</td><td>638</td></tr>
+            <tr><td><code>vento</code></td><td class="optional">no</td><td>es. +1.2, -0.5, 0.0</td><td>+0.8</td></tr>
+            <tr><td><code>piazzamento</code></td><td class="optional">no</td><td>Numero intero</td><td>2</td></tr>
+            <tr><td><code>citta</code></td><td class="optional">no</td><td>Testo libero</td><td>Brescia</td></tr>
+            <tr><td><code>data</code></td><td class="optional">no</td><td>gg/mm/aaaa oppure gg/mm</td><td>18/04/2026</td></tr>
+          </tbody>
+        </table>
+        <p style="font-size:.74rem;color:var(--muted);margin:.45rem 0 0">
+          Le intestazioni delle colonne sono <strong>case-insensitive</strong> e gli spazi vengono ignorati.
+          Il separatore deve essere la virgola (<code>,</code>). Valori con virgola devono essere tra doppi apici.
+          Encoding supportati: UTF-8, UTF-8 con BOM, Latin-1.
+        </p>
+
+        <!-- Lista discipline collassabile -->
+        <div id="csv-discipline-list" style="display:none;margin-top:.7rem">
+          <div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:.4rem">Discipline valide per categoria</div>
+          <div id="csv-disc-content" style="font-size:.78rem;display:grid;grid-template-columns:1fr 1fr;gap:.5rem 1.5rem">
+            <div style="color:var(--muted);font-style:italic">Caricamento…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="csv-section">
+        <h4>Carica file</h4>
+        <div class="csv-drop-zone" id="csv-drop-zone"
+             onclick="document.getElementById('csv-file-input').click()"
+             ondragover="event.preventDefault();this.classList.add('drag-over')"
+             ondragleave="this.classList.remove('drag-over')"
+             ondrop="csvHandleDrop(event)">
+          <input type="file" id="csv-file-input" accept=".csv,text/csv" onchange="csvFileChosen(this.files[0])">
+          <div class="csv-drop-label">Clicca oppure trascina qui il file CSV</div>
+          <div class="csv-drop-sub">Solo file .csv &mdash; max 2 MB</div>
+          <div class="csv-file-chosen" id="csv-file-chosen" style="display:none"></div>
+        </div>
+        <div class="csv-action-row">
+          <button class="btn-csv-upload" id="btn-csv-upload" onclick="csvUpload()" disabled>Importa</button>
+          <button class="btn-csv-template" onclick="csvDownloadTemplate()">Scarica template CSV</button>
+          <span id="csv-upload-spinner" style="display:none;font-size:.8rem;color:var(--muted)">Caricamento...</span>
+        </div>
+        <div class="csv-result-box" id="csv-result-box" style="display:none"></div>
+      </div>
+
+    </div><!-- /csv-modal-body -->
+  </div>
+</div><!-- /csv-overlay -->
+
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
