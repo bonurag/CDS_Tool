@@ -32,10 +32,13 @@ class CdsUtils:
     @staticmethod
     def is_ostacoli(ev: str) -> bool:
         """
-        Determina se un evento è una corsa ad ostacoli.
-        
-        :param ev: Nome dell'evento
-        :return: True se l'evento è ad ostacoli, False altrimenti
+        Determina se un evento è una corsa ad ostacoli o siepi.
+
+        Riconosce: ``"ostac"`` (ostacoli), ``"hs"`` come parola/prefisso
+        (High Steps — notazione FIDAL abbreviata), ``"siepi"`` (3000 siepi).
+
+        :param ev: Nome dell'evento (es. ``'80 hs'``, ``'100 ostacoli'``).
+        :return: True se è una corsa ad ostacoli/siepi, False altrimenti.
         """
         e = ev.lower()
         return 'ostac' in e or ' hs' in e or 'hs ' in e or e.startswith('hs')
@@ -43,21 +46,30 @@ class CdsUtils:
     @staticmethod
     def athlete_key(name: str) -> str:
         """
-        Estrae una chiave univoca per un atleta (es. cognome) per evitare che superi
-        il limite di gare partecipabili. Usiamo la prima parola del nome.
-        
-        :param name: Nome completo dell'atleta
-        :return: Chiave normalizzata dell'atleta (es. cognome maiuscolo)
+        Estrae la chiave identificativa di un atleta dalla stringa nome FIDAL.
+
+        FIDAL usa il formato ``"COGNOME Nome"`` (cognome in maiuscolo, nome in
+        misto), quindi la prima parola corrisponde al cognome ed è sufficiente
+        come chiave per il controllo del limite di partecipazione (max 2 gare
+        per atleta in CF/CM, max 1 individuale in RF/RM).
+
+        :param name: Nome completo atleta (es. ``'ROSSI Mario'``). Stringa vuota → ``''``.
+        :return: Prima parola in maiuscolo (es. ``'ROSSI'``), oppure ``''``.
         """
         return name.split()[0].upper() if name else ''
 
     @staticmethod
     def staff_athlete_keys(raw_staff: str) -> list:
         """
-        Estrae le chiavi (cognomi) delle atlete facenti parte di una staffetta dalla stringa grezza FIDAL.
-        
-        :param raw_staff: Stringa della composizione staffetta (es. 'LORINI A. CF, ROSSI B. CF')
-        :return: Lista delle chiavi degli atleti della staffetta
+        Estrae le chiavi (cognomi) degli atleti di una staffetta dalla stringa grezza FIDAL.
+
+        La stringa FIDAL tipicamente ha il formato:
+        ``"COGNOME1 N. CF, COGNOME2 M. CF / COGNOME3 L. CF"``.
+        Il metodo divide per ``,`` o ``/``, rimuove il suffisso categoria a due
+        lettere maiuscole (es. ``"CF"``) e applica ``athlete_key`` a ogni parte.
+
+        :param raw_staff: Stringa composizione staffetta (può essere ``None`` o vuota).
+        :return: Lista di chiavi cognome (stringhe maiuscole), senza duplicati di ordine.
         """
         keys = []
         for part in re.split(r'[,/]', raw_staff or ''):
@@ -69,7 +81,16 @@ class CdsUtils:
 
     @staticmethod
     def cds_program_cf(ev: str) -> bool:
-        """Filtro tecnico (M/F): Cadette (CF)"""
+        """Verifica se un evento rientra nel programma tecnico CdS per le Cadette (CF).
+
+        Discipline incluse: 80 piani, 80 hs, 300 piani, 300 hs, 1000 m, 1200 m, 2000 m,
+        salto in alto, salto in lungo, salto triplo, salto con l'asta, getto del peso,
+        lancio del martello, lancio del disco, lancio del giavellotto,
+        staffetta 4x100, marcia.
+
+        :param ev: Nome evento (case-insensitive).
+        :return: True se l'evento è nel programma CF.
+        """
         e = ev.lower()
         return (('80' in e and ('piani' in e or CdsUtils.is_ostacoli(e))) or
                 ('300' in e and (CdsUtils.is_ostacoli(e) or 'piani' in e)) or
@@ -82,7 +103,16 @@ class CdsUtils:
 
     @staticmethod
     def cds_program_cm(ev: str) -> bool:
-        """Filtro tecnico (M/F): Cadetti (CM)"""
+        """Verifica se un evento rientra nel programma tecnico CdS per i Cadetti (CM).
+
+        Discipline incluse: 80 piani, 100 hs, 300 piani, 300 hs, 1000 m, 1200 m, 2000 m,
+        salto in alto, salto in lungo, salto triplo, salto con l'asta,
+        getto del peso (Kg 4), lancio del martello, lancio del disco, lancio del giavellotto,
+        staffetta 4x100, marcia.
+
+        :param ev: Nome evento (case-insensitive).
+        :return: True se l'evento è nel programma CM.
+        """
         e = ev.lower()
         return (('80' in e and 'piani' in e) or
                 (bool(re.search(r'(?<!\d)100(?!\d)', e)) and CdsUtils.is_ostacoli(e)) or
@@ -97,7 +127,15 @@ class CdsUtils:
 
     @staticmethod
     def cds_program_rm(ev: str) -> bool:
-        """Filtro tecnico (M/F): Ragazzi/e (RM/RF)"""
+        """Verifica se un evento rientra nel programma tecnico CdS per Ragazzi/e (RM/RF).
+
+        Questo filtro è condiviso tra le categorie RM e RF (stesso programma).
+        Discipline incluse: 60 piani, 60 hs, 1000 m, salto in alto, salto in lungo,
+        getto del peso (Kg 2), lancio del vortex, staffetta 4x100, marcia.
+
+        :param ev: Nome evento (case-insensitive).
+        :return: True se l'evento è nel programma RM/RF.
+        """
         e = ev.lower()
         return ((bool(re.search(r'(?<!\d)60(?!\d)', e)) and ('piani' in e or CdsUtils.is_ostacoli(e))) or
                 (bool(re.search(r'(?<!\d)1000(?!\d)', e)) and '3x' not in e and '3 x' not in e) or
@@ -107,7 +145,13 @@ class CdsUtils:
 
     @staticmethod
     def get_cds_program(cat: str):
-        """Restituisce il filtro programma per la categoria specificata."""
+        """Restituisce la funzione filtro programma CdS per la categoria specificata.
+
+        :param cat: Sigla categoria (``'CF'``, ``'CM'``, ``'RF'``, ``'RM'``).
+        :return: Callable ``(ev: str) -> bool`` da usare come predicato di filtro,
+                 oppure ``None`` se la categoria non ha un programma definito
+                 (in quel caso nessun evento viene escluso).
+        """
         programs = {
             'CF': CdsUtils.cds_program_cf,
             'CM': CdsUtils.cds_program_cm,

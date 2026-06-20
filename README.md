@@ -8,7 +8,7 @@ Scarica le graduatorie direttamente dalla banca dati FIDAL e aiuta a scegliere i
 ## Requisiti
 
 ```bash
-pip install flask requests beautifulsoup4
+pip install -r requirements.txt
 ```
 
 Python 3.8+
@@ -204,24 +204,37 @@ Lo script installa automaticamente le dipendenze e produce `dist\FIDAL_CDS_Tool.
 
 ```text
 C:\...\CDS_Tool
- ├── core\                   # Logica di dominio
- │    ├── cds_optimizer.py   # Algoritmo DFS Branch & Bound per l'ottimizzazione della scheda
- │    ├── cds_utils.py       # Classificazione eventi, preset CdS, vincoli regolamentari
- │    └── cds_manual.py      # Lettura/scrittura persistente di manual_entries.json
+ ├── core\                        # Logica di dominio
+ │    ├── cds_optimizer.py        # Algoritmo DFS Branch & Bound per l'ottimizzazione della scheda
+ │    ├── cds_utils.py            # Classificazione eventi, preset CdS, vincoli regolamentari
+ │    └── cds_manual.py           # Lettura/scrittura persistente di manual_entries.json
  │
- ├── data\                   # Tabelle punteggi FIDAL (JSON)
- │    ├── Cadette.json       # CF — Cadette
- │    ├── Cadetti.json       # CM — Cadetti
- │    ├── Ragazze.json       # RF — Ragazze
- │    └── Ragazzi.json       # RM — Ragazzi
+ ├── data\                        # Tabelle punteggi FIDAL (JSON)
+ │    ├── Cadette.json            # CF — Cadette
+ │    ├── Cadetti.json            # CM — Cadetti
+ │    ├── Ragazze.json            # RF — Ragazze
+ │    └── Ragazzi.json            # RM — Ragazzi
  │
- ├── dev\                    # Script ausiliari di sviluppo
- ├── tests\                  # Test empirici e chiamate server simulate
+ ├── static\                      # Asset statici serviti da Flask
+ │    ├── css\style.css           # Foglio di stile dell'interfaccia
+ │    └── js\app.js               # Logica frontend (vanilla JS)
  │
- ├── fidal_cds_tool.py       # Server Flask + UI (HTML/CSS/JS inline)
- ├── manual_entries.json     # Risultati manuali salvati (generato automaticamente)
- ├── fidal_cds_tool.spec     # Schema compilazione PyInstaller (.exe)
- └── build.bat               # Builder eseguibile autonomo Windows
+ ├── templates\                   # Template Jinja2
+ │    └── index.html              # Pagina principale (riferisce static/)
+ │
+ ├── tests\                       # Suite di test automatizzati (pytest)
+ │    ├── unit\                   # Test unitari (CdsUtils, CdsOptimizer, helper, CSV)
+ │    └── integration\            # Test di integrazione (Flask test client, API routes)
+ │
+ ├── dev\                         # Script one-shot usati durante lo sviluppo (storico)
+ │
+ ├── fidal_cds_tool.py            # Server Flask — routing API, scraper FIDAL, business logic
+ ├── manual_entries.json          # Risultati manuali salvati (generato automaticamente)
+ ├── fidal_cds_tool.spec          # Schema compilazione PyInstaller (.exe)
+ ├── requirements.txt             # Dipendenze Python (flask, requests, bs4, pytest…)
+ ├── pytest.ini                   # Configurazione pytest (testpaths, naming)
+ ├── ruff.toml                    # Configurazione linter ruff (select E,W,F; exclude dev/)
+ └── build.bat                    # Builder eseguibile autonomo Windows
 ```
 
 ### Evoluzione algoritmica — Ottimizzatore v2 (DFS + Branch & Bound)

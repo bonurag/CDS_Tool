@@ -9,12 +9,32 @@ OPT_TIME_BUDGET_MAX = 300
 
 class CdsOptimizer:
     """
-    Classe core per il calcolo dell'ottimizzazione e selezione punteggi per i CdS FIDAL.
-    Utilizza un esploratore combinatorio dello spazio delle gare (brute-force) supportato da
-    un meccanismo DFS branch & bound per la ripartizione atleti intra-gara.
-    
-    Adatto per qualsiasi categoria provinciale (CF, CM, RF, RM) a patto
-    che i metadati (limiti, massimali, regole) siano correttamente forniti in CAT_CONSTRAINTS.
+    Motore di ottimizzazione combinatoria per la scheda CdS FIDAL.
+
+    Implementa un algoritmo DFS Branch & Bound a due livelli:
+
+    **Livello esterno** (``compute_optimal``): itera su tutte le combinazioni valide
+    di gare (``combinations`` su ``ev_list``) e di gare "doppiate" (``combinations``
+    su ``dbl``), con due strati di pruning upper-bound (outer + de-specific) che
+    eliminano i sottoinsiemi di gare il cui massimo teorico non può battere il
+    miglior totale corrente.
+
+    **Livello interno** (``opt_assign_best``): per ogni sottoinsieme di gare fissato,
+    esegue un DFS backtracking che assegna atleti agli slot disponibili, con pruning
+    sul vettore ``max_rem`` (somma cumulativa dei punteggi residui massimi).
+
+    I vincoli regolamentari per categoria sono definiti in ``CAT_CONSTRAINTS``:
+
+    +---------+-------+--------+-----------+-----------+-------------+------+
+    | cat     | nSel  | minEv  | minLanci  | minSalti  | maxAthlInd  | maxD |
+    +=========+=======+========+===========+===========+=============+======+
+    | CF / CM |  13   |   10   |     2     |     2     |      2      |   3  |
+    +---------+-------+--------+-----------+-----------+-------------+------+
+    | RF / RM |   8   |    6   |     1     |     1     |      1      |   2  |
+    +---------+-------+--------+-----------+-----------+-------------+------+
+
+    Dove: ``nSel`` = risultati totali, ``minEv`` = gare minime, ``maxAthlInd`` = max
+    individuali per atleta, ``maxD`` = max gare raddoppiate.
     """
 
     CAT_CONSTRAINTS = {
@@ -96,6 +116,19 @@ class CdsOptimizer:
         ev_cands = {ev: by_ev.get(ev, [])[:15] for ev in set(slots_to_fill)}
 
         def dfs(slot_idx, current_score, current_sel, ac_t, ac_i, used_ids, last_cand_idx):
+            """Backtracking ricorsivo con Branch & Bound per riempire gli slot individuali.
+
+            :param slot_idx: Indice dello slot corrente in ``slots_to_fill`` (0-based).
+            :param current_score: Punteggio accumulato dagli slot già assegnati.
+            :param current_sel: Lista (mutata in-place) dei risultati già assegnati.
+            :param ac_t: Dict ``{cognome: count}`` delle presenze totali (individuale + staffetta).
+            :param ac_i: Dict ``{cognome: count}`` delle presenze solo individuali (reset ad ogni branch).
+            :param used_ids: Set di ``id(risultato)`` già assegnati (evita duplicati in-slot).
+            :param last_cand_idx: Indice dell'ultimo candidato usato nello slot precedente (stessa gara);
+                                  usato per la rottura di simmetria negli slot doppi (start_idx = last+1).
+
+            Termina anticipatamente (pruning) se ``current_score + max_rem[slot_idx] <= best_score``.
+            """
             nonlocal best_score, best_sel
             if deadline is not None and time.time() > deadline:
                 return
@@ -151,18 +184,19 @@ class CdsOptimizer:
 
     @classmethod
     def _estimate_budget(cls, results, cat):
-        """
-        Calcola il budget di tempo adattivo in secondi in funzione della complessità
-        combinatoria del problema (numero di eventi e candidati per gara).
+        """Stima il budget di tempo adattivo (secondi) in funzione della complessità combinatoria.
 
-        Logica:
-        - Conta il numero totale di chiamate a opt_assign_best che il loop esterno
-          produrrebbe: Σ C(n_gare, k) × Σ C(n_doppie, j) per ogni k,j valido.
-        - Il costo per chiamata dipende dall'efficacia del Branch & Bound:
-          più candidati per gara → pruning più aggressivo → ogni chiamata è più veloce.
-          Calibrato empiricamente su ~9 atleti / 14 gare / ~3 cand/gara ≈ 25 s.
-        - Il risultato viene raddoppiato come margine di sicurezza e clampato tra
-          15 s (minimo utile) e OPT_TIME_BUDGET_MAX.
+        Conta il numero totale di chiamate a ``opt_assign_best`` che il loop esterno
+        produrrebbe: Σ C(n_gare, k) × Σ C(n_doppie, j) per ogni (k, j) valido.
+        Il costo per chiamata dipende dall'efficacia del B&B: più candidati per gara
+        → pruning più aggressivo → ogni chiamata è più veloce.
+        Calibrato empiricamente su ~9 atleti / 14 gare / ~3 cand/gara ≈ 25 s.
+        Il risultato viene raddoppiato come margine di sicurezza e clampato tra
+        15 s (minimo utile) e ``OPT_TIME_BUDGET_MAX``.
+
+        :param results: Lista di risultati parsati (stessa struttura di ``compute_optimal``).
+        :param cat: Sigla categoria (``'CF'``, ``'CM'``, ``'RF'``, ``'RM'``).
+        :return: Numero intero di secondi da usare come ``time_budget`` in ``compute_optimal``.
         """
         C = cls.CAT_CONSTRAINTS.get(cat, cls.CAT_CONSTRAINTS['CF'])
         n_sel, min_ev, max_d = C['nSel'], C['minEv'], C['maxD']
@@ -199,14 +233,38 @@ class CdsOptimizer:
 
     @classmethod
     def compute_optimal(cls, results, cat, time_budget=None):
-        """
-        Calcola la scheda ottimale per una società per la categoria specificata.
-        Restituisce un dizionario coi risultati validati o None.
+        """Calcola la scheda CdS ottimale (punteggio massimo) per la categoria specificata.
 
-        :param results: Array coi dizionari risultati fidal parsati.
-        :param cat: Stringa denominazione categoria (CF, CM, RF, RM, ecc)
-        :param time_budget: Secondi massimi (None = nessun limite, risultato garantito ottimale).
-                           Usare solo se si accetta un risultato sub-ottimale in cambio di velocità.
+        Esegue la ricerca combinatoria completa (DFS Branch & Bound a due livelli) su
+        tutti i sottoinsiemi validi di gare e di staffette. Se viene fornito ``time_budget``,
+        la ricerca si interrompe alla scadenza restituendo il miglior risultato trovato
+        fino a quel momento (sub-ottimale); senza limite il risultato è garantito ottimale.
+
+        :param results: Lista di dict risultati FIDAL parsati. Ogni dict deve contenere almeno:
+                        ``ev`` (str nome gara), ``pts`` (int/None), ``pts_ok`` (bool),
+                        ``athlete`` (str), ``isStaffetta`` (bool), ``perf`` (str),
+                        e opzionalmente ``rawStaff`` (str composizione staffetta FIDAL).
+        :param cat: Sigla categoria (``'CF'``, ``'CM'``, ``'RF'``, ``'RM'``).
+        :param time_budget: Secondi massimi di ricerca (float/int). ``None`` = nessun limite.
+        :return: Dizionario risultato oppure ``None`` se non esistono risultati validi.
+
+                 Struttura del dict restituito::
+
+                     {
+                         "score":      int,          # punteggio totale ottimale
+                         "ids":        list,          # id di ogni risultato selezionato
+                         "sel":        [              # dettaglio ogni risultato
+                             {
+                                 "id":          any,
+                                 "ev":          str,
+                                 "athlete":     str,
+                                 "pts":         int,
+                                 "perf":        str,
+                                 "isStaffetta": bool,
+                             }, ...
+                         ],
+                         "updated_at": str,           # timestamp ISO 8601 (ora locale)
+                     }
         """
         deadline = (time.time() + time_budget) if time_budget is not None else None
         C = cls.CAT_CONSTRAINTS.get(cat, cls.CAT_CONSTRAINTS['CF'])

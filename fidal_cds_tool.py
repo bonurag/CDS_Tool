@@ -1,8 +1,30 @@
 #!/usr/bin/env python3
 """
-FIDAL CdS Tool — Scheda Provinciale Cadette/Cadetti
-Uso: python fidal_cds_tool.py
-Poi apri http://localhost:5001
+FIDAL CdS Tool — Scheda Provinciale CdS (CF · CM · RF · RM)
+
+Server Flask che espone le API di scraping, ottimizzazione e persistenza e
+serve il frontend tramite template Jinja2 (templates/index.html) e file statici
+(static/css/style.css, static/js/app.js).
+
+Avvio:
+    python fidal_cds_tool.py [porta]   (default: 5001)
+
+Endpoint principali:
+    GET  /                              Frontend web
+    GET  /api/fetch                     Scarica graduatorie da FIDAL
+    POST /api/ottimizza                 Calcola scheda ottimale (DFS B&B)
+    GET  /api/proiezione                Proiezione regionale (cached)
+    GET  /api/proiezione/build          Build proiezione SSE (tutte le società)
+    GET  /api/tabelle                   Tabelle punteggi JSON
+    GET  /api/discipline_list           Lista discipline per categoria
+    GET  /api/manual                    Leggi manual entries
+    POST /api/manual                    Salva un manual entry
+    DEL  /api/manual/<id>               Elimina un manual entry
+    GET  /api/manual/template_csv       Scarica template CSV
+    POST /api/manual/import_csv         Importa file CSV
+    POST /api/reoptimize_soc            Ricalcola ottimale singola società
+    GET  /api/societa                   Lista società di una regione
+    GET  /api/fidal_status              Health-check raggiungibilità FIDAL
 """
 from flask import Flask, jsonify, request, Response, stream_with_context, render_template
 import requests
@@ -32,7 +54,15 @@ app = Flask(
 # ── TABELLE PUNTEGGI ─────────────────────────────────────────────────────────
 
 def _load_tabella(filename):
-    # In modalità PyInstaller i dati vengono estratti in sys._MEIPASS
+    """Carica un file JSON delle tabelle punteggi e lo converte in un dict annidato.
+
+    Gestisce sia l'esecuzione normale sia la modalità frozen (PyInstaller), dove i
+    file dati vengono estratti in ``sys._MEIPASS`` invece che accanto al sorgente.
+
+    :param filename: Nome del file JSON nella cartella ``data/`` (es. ``'Cadette.json'``).
+    :return: ``{nome_gara: {prestazione_str: punti_int}}`` oppure ``{}`` se il file
+             non esiste o il JSON è malformato.
+    """
     base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
     path = os.path.join(base, 'data', filename)
     if not os.path.exists(path):
@@ -51,7 +81,19 @@ _TABELLE = {
 }
 
 def _match_gara(fidal_name, tabella):
-    """Restituisce la chiave della tabella che corrisponde al nome FIDAL, o None."""
+    """Ricerca fuzzy del nome gara FIDAL nella tabella punteggi locale.
+
+    Applica quattro strategie di match in ordine di precisione decrescente:
+    1. Corrispondenza esatta (case-sensitive poi case-insensitive).
+    2. Rimozione del suffisso internazionale dopo ``/`` (es. ``"Salto in lungo/LJ"``).
+    3. Match numerico + tipo gara (``"piani"``, ``"hs"``, distanze medie).
+    4. Match per keyword di salti e lanci (``"lungo"``, ``"peso"``, ``"martello"``…).
+
+    :param fidal_name: Nome evento come restituito dallo scraper FIDAL.
+    :param tabella: Dict ``{nome_canonico: {perf: pts}}`` caricato da ``_TABELLE``.
+    :return: Chiave canonica della tabella corrispondente, oppure ``None`` se
+             nessuna strategia trova una corrispondenza.
+    """
     fn = fidal_name.strip()
     fn_low = fn.lower()
 
@@ -110,7 +152,18 @@ def _match_gara(fidal_name, tabella):
     return None
 
 def _parse_perf_s(perf):
-    """Converte una prestazione in float (secondi per corse, metri per campo)."""
+    """Converte una stringa di prestazione in un valore float numerico.
+
+    Formati supportati:
+    - Numero semplice: ``"42.10"`` o ``"13,45"`` (virgola → punto)
+    - Minuti:secondi: ``"1:30.00"`` → 90.0
+    - Ore:minuti:secondi: ``"1:00:00"`` → 3600.0
+
+    Per le corse il valore è in **secondi**; per salti e lanci è in **metri**.
+
+    :param perf: Stringa di prestazione (viene strip-pata prima dell'analisi).
+    :return: Valore float oppure ``None`` se il formato non è riconoscibile.
+    """
     perf = perf.strip()
     if ':' in perf:
         parts = perf.split(':')
@@ -126,6 +179,25 @@ def _parse_perf_s(perf):
         return None
 
 def _lookup_pts(fidal_name, perf, categoria):
+    """Cerca il punteggio FIDAL per una prestazione nella tabella della categoria.
+
+    Strategia a due fasi:
+    1. **Match esatto** sulla stringa di prestazione (es. ``"42.10"``).
+    2. **Fallback numerico**: converte la prestazione in float e trova il bucket
+       immediatamente peggiore nella tabella (eccesso per corse/ostacoli,
+       difetto per salti/lanci) — metodo ufficiale FIDAL.
+
+    La direzione corsa/campo viene rilevata automaticamente confrontando i
+    punteggi degli estremi della tabella (min_valore ↔ max_punti → corsa).
+
+    :param fidal_name: Nome evento come da scraper FIDAL (viene passato a ``_match_gara``).
+    :param perf: Prestazione in formato stringa (es. ``"42.10"``, ``"1:52.30"``).
+    :param categoria: Sigla categoria (``"CF"``, ``"CM"``, ``"RF"``, ``"RM"``).
+    :return: Tupla ``(punti: int, trovato: bool)``.
+             ``trovato=False`` se la categoria o la gara non esistono in tabella,
+             oppure se la stringa di prestazione non è parsabile.
+             ``trovato=True`` con ``punti=0`` se la prestazione è fuori range tabella.
+    """
     tabella = _TABELLE.get(categoria, {})
     if not tabella:
         return 0, False
@@ -172,6 +244,16 @@ def _lookup_pts(fidal_name, perf, categoria):
 # ── SCRAPER ──────────────────────────────────────────────────────────────────
 
 def classify_event(nome):
+    """Classifica il tipo di evento atletico da una stringa di nome.
+
+    Restituisce una delle cinque categorie usate dal frontend e dall'ottimizzatore:
+    ``'staffetta'``, ``'ostacoli'``, ``'salto'``, ``'lancio'``, ``'corsa'``.
+    La classificazione è case-insensitive e basata su regex e keyword.
+
+    :param nome: Nome evento (es. ``"80 ostacoli"``, ``"Salto in lungo"``, ``"4x100"``).
+    :return: Stringa tipo evento: ``'staffetta'`` | ``'ostacoli'`` | ``'salto'`` |
+             ``'lancio'`` | ``'corsa'`` (default se nessuna keyword corrisponde).
+    """
     n = nome.lower()
     if re.search(r'staffetta|[34]x\d+|\dx\d', n): return 'staffetta'
     if re.search(r'\bhs\b|ostacoli|siepi', n):     return 'ostacoli'
@@ -189,6 +271,23 @@ def _expand_year(raw: str) -> str:
 
 
 def parse_graduatorie(html):
+    """Estrae i risultati atletici dall'HTML delle graduatorie FIDAL.
+
+    Naviga la struttura HTML FIDAL: ogni blocco gara è una ``<table class="graduatorie">``
+    con una cella intestazione (sfondo ``#5ea2e7``) seguita da una
+    ``<table class="tabella">`` con le righe dei risultati.
+
+    Per ogni riga valida (≥ 6 colonne, prestazione non vuota) costruisce un dict
+    con i campi:
+    ``id``, ``ev``, ``type``, ``athlete``, ``athlete_url``, ``perf``, ``wind``,
+    ``piazz``, ``citta``, ``data``, ``anno``, ``pts`` (0), ``est`` (True),
+    ``isStaffetta``, ``rawStaff``.
+
+    I punti vengono calcolati separatamente da ``_lookup_pts`` dopo il parsing.
+
+    :param html: Testo HTML della risposta FIDAL (POST a ``graduatorie.php``).
+    :return: Lista di dict risultati (può essere vuota se la pagina non contiene graduatorie).
+    """
     soup = BeautifulSoup(html, 'html.parser')
     results, rid = [], 0
     for header in soup.find_all('table', class_='graduatorie'):
@@ -268,6 +367,22 @@ def _do_fidal_fetch(p):
 
 @app.route('/api/fetch')
 def api_fetch():
+    """GET /api/fetch — Scarica e restituisce le graduatorie FIDAL per una società.
+
+    Query parameters (tutti opzionali, con default):
+        anno         (str)  Anno sportivo (default: ``'2026'``)
+        tipo_attivita(str)  ``'P'`` outdoor, ``'I'`` indoor (default: ``'P'``)
+        sesso        (str)  ``'F'`` o ``'M'`` (default: ``'F'``)
+        categoria    (str)  CF · CM · RF · RM (default: ``'CF'``)
+        vento        (str)  Filtro vento (default: ``'2'``)
+        regione      (str)  Sigla regione FIDAL (default: ``'LOM'``)
+        nazionalita  (str)  ``'0'`` = tutti (default: ``'0'``)
+        limite       (str)  Max risultati per gara (default: ``'100'``)
+        societa      (str)  Codice società FIDAL (es. ``'BS318'``)
+
+    Response JSON:
+        ``{ok: true, data: [...], url: str}`` oppure ``{ok: false, error: str}``
+    """
     try:
         p = {k: request.args.get(k, d) for k, d in [
             ('anno','2026'),('tipo_attivita','P'),('sesso','F'),
@@ -280,6 +395,13 @@ def api_fetch():
         return jsonify({'ok':False,'error':str(e)}), 500
 
 def _proiezione_cache_path(anno, tipo, sesso, cat, reg):
+    """Restituisce il percorso assoluto del file cache JSON della proiezione regionale.
+
+    Il file viene scritto nella stessa directory di ``manual_entries.json`` (``_data_dir()``).
+    Nome pattern: ``proiezione_<anno>_<tipo>_<sesso>_<cat>_<reg>.json``.
+
+    :return: Percorso assoluto (stringa) del file cache.
+    """
     fname = f'proiezione_{anno}_{tipo}_{sesso}_{cat}_{reg}.json'
     return os.path.join(_data_dir(), fname)
 
@@ -302,12 +424,40 @@ _COMPETE_THRESH = {
 }
 
 def _can_compete_cat(n_ev, n_la, n_sa, cat):
+    """Verifica se una società soddisfa i requisiti minimi per competere nella categoria.
+
+    Le soglie per RF/RM sono: ≥ 6 gare, ≥ 1 lancio, ≥ 1 salto.
+    Per CF/CM (default): ≥ 10 gare, ≥ 2 lanci, ≥ 2 salti.
+
+    :param n_ev: Numero di gare diverse presenti nei risultati.
+    :param n_la: Numero di gare di lancio diverse.
+    :param n_sa: Numero di gare di salto diverse.
+    :param cat: Sigla categoria (``'CF'``, ``'CM'``, ``'RF'``, ``'RM'``).
+    :return: ``True`` se la società può partecipare con una scheda valida.
+    """
     min_ev, min_la, min_sa = _COMPETE_THRESH.get(cat, (10, 2, 2))
     return n_ev >= min_ev and n_la >= min_la and n_sa >= min_sa
 
 
 def _soc_meta(results, cat=None):
-    """Statistiche aggregate per una società: totale punti, breakdown per tipo, eleggibilità."""
+    """Calcola le statistiche aggregate di una società a partire dai suoi risultati.
+
+    Se ``cat`` è specificato, filtra prima i risultati con il preset programma CdS
+    della categoria (``CdsUtils.get_cds_program``).
+
+    :param results: Lista di dict risultato (output di ``_do_fidal_fetch`` o cache).
+    :param cat: Sigla categoria opzionale per il filtro programma CdS.
+    :return: Dict con le chiavi:
+        - ``num_gare`` (int) — gare distinte presenti
+        - ``total_pts`` (int) — somma punti di tutti i risultati
+        - ``pts_corsa`` (int) — punti da corse e ostacoli
+        - ``pts_lanci`` (int) — punti da lanci
+        - ``pts_salti`` (int) — punti da salti
+        - ``pts_staffette`` (int) — punti da staffette
+        - ``n_lanci`` (int) — gare di lancio diverse
+        - ``n_salti`` (int) — gare di salto diverse
+        - ``can_compete`` (bool) — True se rispetta le soglie minime di ``_can_compete_cat``
+    """
     _lanci_kw = {'peso','martello','giavellotto','disco','lancio','vortex','palla'}
     _salti_kw = {'lungo','triplo','alto','asta','salto'}
     cds_prog = CdsUtils.get_cds_program(cat) if cat else None
@@ -347,6 +497,19 @@ def _soc_meta(results, cat=None):
 
 @app.route('/api/proiezione')
 def api_proiezione():
+    """GET /api/proiezione — Proiezione regionale con cache su file.
+
+    Scarica i risultati aggregati (top-10 per gara) per una regione e li
+    salva in un file JSON locale per evitare re-fetch a ogni visita.
+
+    Query parameters: anno, tipo_attivita, sesso, categoria, regione,
+                      nazionalita, vento, force (``'1'`` forza il re-fetch).
+
+    Response JSON:
+        ``{ok, from_cache, data, updated_at, societies_meta}`` con cache hit,
+        oppure ``{ok, from_cache, data, updated_at}`` senza cache.
+        In caso di errore: ``{ok: false, error: str}``.
+    """
     anno  = request.args.get('anno',  '2026')
     tipo  = request.args.get('tipo_attivita', 'P')
     sesso = request.args.get('sesso', 'F')
@@ -393,6 +556,22 @@ def api_proiezione():
 
 @app.route('/api/ottimizza', methods=['POST'])
 def api_ottimizza():
+    """POST /api/ottimizza — Calcola la scheda ottimale per una società.
+
+    Esegue l'ottimizzazione DFS Branch & Bound via ``CdsOptimizer.compute_optimal``.
+    Calcola sia la baseline (senza staffette) sia l'ottimale con ogni staffetta
+    eleggibile, restituendo il punteggio migliore.
+
+    Request JSON:
+        ``{categoria: str, data: [risultati]}``
+        I risultati devono avere i campi ``ev``, ``pts``, ``pts_ok``, ``isStaffetta``.
+
+    Response JSON:
+        ``{ok, optimal, baseline_score, staff_scores}``
+        - ``optimal`` — dict con ``score``, ``ids``, ``sel``, ``updated_at``
+        - ``baseline_score`` — int, punteggio senza staffette
+        - ``staff_scores`` — ``{staff_id: score}`` per ogni staffetta testata
+    """
     try:
         payload = request.get_json()
         results = list(payload.get('data', []))
@@ -437,10 +616,12 @@ def api_ottimizza():
 
 @app.route('/')
 def index():
+    """GET / — Serve il frontend tramite template Jinja2 (templates/index.html)."""
     return render_template('index.html')
 
 @app.route('/.well-known/appspecific/com.chrome.devtools.json')
 def chrome_devtools():
+    """GET /.well-known/... — Risposta vuota per sopprimere i warning DevTools di Chrome."""
     return jsonify({})
 
 @app.route('/api/fidal_status')
@@ -471,12 +652,24 @@ _write_manual = write_manual
 
 @app.route('/api/manual', methods=['GET'])
 def api_manual_get():
+    """GET /api/manual?categoria=CF — Restituisce i manual entries per la categoria.
+
+    :query categoria: Sigla categoria (CF · CM · RF · RM). Se assente restituisce [].
+    :return: ``{ok: true, data: [entries]}``
+    """
     categoria = request.args.get('categoria', '')
     data = _read_manual()
     return jsonify({'ok': True, 'data': data.get(categoria, [])})
 
 @app.route('/api/manual', methods=['POST'])
 def api_manual_save():
+    """POST /api/manual — Salva un nuovo manual entry nel file JSON persistente.
+
+    Request JSON: dict entry con almeno il campo ``categoria``.
+    Aggiunge automaticamente ``savedId`` (``<cat>_<ns_timestamp>``) e ``savedAt``.
+
+    :return: ``{ok: true, savedId: str}`` oppure ``{ok: false, error: str}``.
+    """
     try:
         entry = request.get_json(force=True)
         categoria = entry.get('categoria', '')
@@ -494,6 +687,11 @@ def api_manual_save():
 
 @app.route('/api/manual/<saved_id>', methods=['DELETE'])
 def api_manual_delete(saved_id):
+    """DELETE /api/manual/<saved_id> — Rimuove un manual entry da tutte le categorie.
+
+    :param saved_id: Valore del campo ``savedId`` dell'entry da eliminare.
+    :return: ``{ok: true}`` oppure ``{ok: false, error: str}``.
+    """
     try:
         data = _read_manual()
         for cat in list(data.keys()):
@@ -530,6 +728,11 @@ _CSV_TEMPLATE_ROWS = [
 
 @app.route('/api/discipline_list', methods=['GET'])
 def api_discipline_list():
+    """GET /api/discipline_list — Lista discipline valide per ogni categoria.
+
+    :return: ``{CF: [...], CM: [...], RF: [...], RM: [...]}`` con i nomi canonici
+             ordinati alfabeticamente, estratti dalle tabelle punteggi JSON.
+    """
     return jsonify({cat: _gare_valide(cat) for cat in _CSV_VALID_CATEGORIE})
 
 @app.route('/api/tabelle', methods=['GET'])
@@ -552,6 +755,13 @@ def api_tabelle():
 
 @app.route('/api/manual/template_csv', methods=['GET'])
 def api_manual_template_csv():
+    """GET /api/manual/template_csv — Scarica un file CSV di esempio precompilato.
+
+    Il file contiene l'intestazione con tutte le colonne (obbligatorie + opzionali)
+    e tre righe di esempio (staffetta CF, lancio CM, corsa CF).
+
+    :return: Risposta CSV con Content-Disposition attachment.
+    """
     content = '\r\n'.join(_CSV_TEMPLATE_ROWS) + '\r\n'
     from flask import Response
     return Response(
@@ -562,6 +772,26 @@ def api_manual_template_csv():
 
 @app.route('/api/manual/import_csv', methods=['POST'])
 def api_manual_import_csv():
+    """POST /api/manual/import_csv — Importa risultati da un file CSV multipart.
+
+    Accetta un file CSV (campo ``file`` nel form) con codifica UTF-8, UTF-8-BOM o Latin-1.
+    Colonne obbligatorie: ``categoria``, ``gara``, ``tipo``, ``prestazione``, ``atleta``.
+    Colonne opzionali: ``punti``, ``vento``, ``piazzamento``, ``citta``, ``data``.
+
+    Per ogni riga:
+    - Valida categoria (CF · CM · RF · RM), tipo (corsa · ostacoli · salto · lancio · staffetta).
+    - Verifica che ``gara`` corrisponda a una disciplina canonica della categoria
+      (case-insensitive); se non corrisponde la riga viene rifiutata con messaggio esplicito.
+    - Se ``punti`` è vuoto, esegue il lookup automatico via ``_lookup_pts``.
+    - Normalizza il nome staffetta in ``"COGNOME1 / COGNOME2 / ..."``.
+
+    Le righe valide vengono scritte in ``manual_entries.json``; le righe errate
+    vengono raccolte in ``errors`` ma non bloccano l'importazione delle righe valide.
+
+    :return: ``{ok: true, imported: [entries], errors: [{riga, errori, anteprima}]}``
+             oppure ``{ok: false, errors: [...], imported: []}`` se nessuna riga è valida,
+             oppure ``{ok: false, error: str}`` per errori di sistema.
+    """
     import csv
     import io
     try:
@@ -787,6 +1017,14 @@ def _fetch_society_list(regione):
 
 @app.route('/api/societa')
 def api_societa():
+    """GET /api/societa?regione=LOM — Lista delle società affiliate di una regione FIDAL.
+
+    Scrapa ``mappa.php`` di FIDAL per estrarre i codici e i nomi delle società.
+
+    :query regione: Sigla regione FIDAL in maiuscolo (es. ``'LOM'``, ``'PIE'``).
+    :return: ``{ok: true, data: [{cod, nome}]}`` ordinato per nome,
+             oppure ``{ok: false, error: str}`` se la regione è assente o senza società.
+    """
     regione = request.args.get('regione', '').strip().upper()
     if not regione:
         return jsonify({'ok': False, 'error': 'Regione mancante'})
@@ -890,6 +1128,25 @@ def _opt_keepalive(results_full, cat):
 
 @app.route('/api/proiezione/build')
 def api_proiezione_build():
+    """GET /api/proiezione/build — Build completo della proiezione regionale via SSE.
+
+    Per ogni società della regione:
+    1. Scarica le graduatorie FIDAL (top-5 per gara).
+    2. Abbina i manual entries (``_match_manual_to_soc``).
+    3. Se la società può competere (``_can_compete_cat``), calcola la scheda ottimale
+       via ``_opt_keepalive`` (ottimizzatore in thread separato, keepalive SSE ogni 5 s).
+    4. Implementa refresh incrementale: le società con dati invariati (stessi
+       ``num_gare`` e ``total_pts``) riutilizzano la cache senza re-fetch FIDAL.
+
+    Il risultato viene salvato in ``proiezione_<params>.json`` e ogni passo emette
+    un evento SSE con tipo ``'status'`` | ``'total'`` | ``'found'`` | ``'unchanged'``
+    | ``'skip'`` | ``'done'`` | ``'error'``.
+    Un log testuale viene scritto in ``logs/build_log_<params>_<timestamp>.txt``.
+
+    Query parameters: anno, tipo_attivita, sesso, categoria, regione, nazionalita, vento.
+
+    :return: ``Response`` SSE (``text/event-stream``) con ``Cache-Control: no-cache``.
+    """
     anno  = request.args.get('anno',  '2026')
     tipo  = request.args.get('tipo_attivita', 'P')
     sesso = request.args.get('sesso', 'F')
