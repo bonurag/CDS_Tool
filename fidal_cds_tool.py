@@ -470,7 +470,7 @@ def api_manual_save():
         categoria = entry.get('categoria', '')
         if not categoria:
             return jsonify({'ok': False, 'error': 'Categoria mancante'})
-        saved_id = f"{categoria}_{int(time.time()*1000)}"
+        saved_id = f"{categoria}_{time.time_ns()}"
         entry['savedId'] = saved_id
         entry['savedAt'] = time.strftime('%Y-%m-%dT%H:%M:%S')
         data = _read_manual()

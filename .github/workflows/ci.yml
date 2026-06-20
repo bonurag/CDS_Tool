@@ -45,4 +45,4 @@ jobs:
         run: pip install ruff
 
       - name: Lint
-        run: ruff check core/ fidal_cds_tool.py --select E,W,F --ignore E501,W503
+        run: ruff check core/ fidal_cds_tool.py --select E,W,F --ignore E501
