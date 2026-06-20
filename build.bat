@@ -22,7 +22,7 @@ echo.
 
 :: Installa dipendenze tramite modulo (evita problemi PATH di pip)
 echo [1/3] Installazione dipendenze...
-python -m pip install flask requests beautifulsoup4 pyinstaller
+python -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 (
     echo.
     echo ERRORE durante l'installazione delle dipendenze.
