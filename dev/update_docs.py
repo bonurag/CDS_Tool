@@ -5,7 +5,7 @@ import re
 
 old_struct_match = re.search(r'## Struttura del progetto\n\n`	ext\n.*?\n`', text, re.DOTALL)
 if old_struct_match:
-    new_structure = \"\"\"## Struttura del progetto
+    new_structure = """## Struttura del progetto
 
 `	ext
 C:\...\CDS_Tool\
@@ -31,7 +31,7 @@ C:\...\CDS_Tool\
 L'applicativo supererà sempre la logica umana o gli script "Greedy" (ingordi). L'algoritmo integrato nella libreria core sfrutta un processo di esplorazione **Backtracking (Depth-First Search)** con potatura dell'albero **(Pruning, Branch and Bound)**:
 - Riconosce i vicoli ciechi normativi.
 - Taglia preventivamente i calcoli che, seppur alti individualmente, limiterebbero il risultato del team complessivo privandolo di atleti bloccati in gare minori.
-- Prova esattamente l'incastro combinatorio massimo assoluto per raggiungere la vetta dei punti totali consentiti dalle graduatorie.\"\"\"
+- Prova esattamente l'incastro combinatorio massimo assoluto per raggiungere la vetta dei punti totali consentiti dalle graduatorie."""
     
     text = text.replace(old_struct_match.group(0), new_structure)
 

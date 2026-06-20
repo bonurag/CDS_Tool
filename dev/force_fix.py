@@ -1,8 +1,6 @@
 ﻿with open('fidal_cds_tool.py', 'r', encoding='utf-8') as f:
     text = f.read()
 
-import re
-
 # Find index of sync function computeOptimal()
 start = text.find('async function computeOptimal(){')
 end = text.find('// ── CLASSIFICA')
@@ -10,7 +8,7 @@ end = text.find('// ── CLASSIFICA')
 new_optimal = '''async function computeOptimal(){
   const missing=activeAll().filter(r=>userPts[r.id]===undefined&&!r.pts_ok);
   if (missing.length>0){
-    setNoteEst(⚠ \ risultat\ senza punteggio — inserisci i punti FIDAL per tutti prima di calcolare., true);
+    setNoteEst(⚠ \\ risultat\\ senza punteggio — inserisci i punti FIDAL per tutti prima di calcolare., true);
     return;
   }
   setNoteEst('');
@@ -49,7 +47,7 @@ new_optimal = '''async function computeOptimal(){
       selectedIds.clear();
       
       if (!res.optimal || !res.optimal.sel || res.optimal.sel.length !== C.nSel){
-          setNoteEst(⚠ Impossibile trovare \ risultati validi che incastrino tutti i vincoli., true);
+          setNoteEst(⚠ Impossibile trovare \\ risultati validi che incastrino tutti i vincoli., true);
       } else {
           setNoteEst('');
           staffAnalysis = []; 

@@ -1,8 +1,7 @@
 ﻿with open('fidal_cds_tool.py', 'r', encoding='utf-8') as f:
     text = f.read()
 
-import re
-old = "soc_manual = _match_manual_to_soc(\n                                manual_entries, soc['cod'], soc['nome'], results)\n                            results_full = results + soc_manual"
+old ="soc_manual = _match_manual_to_soc(\n                                manual_entries, soc['cod'], soc['nome'], results)\n                            results_full = results + soc_manual"
 new = "soc_manual = _match_manual_to_soc(\n                                manual_entries, soc['cod'], soc['nome'], results)\n                            _normalize_events(soc_manual, cat)\n                            results_full = results + soc_manual"
 text = text.replace(old, new)
 

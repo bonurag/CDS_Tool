@@ -1,11 +1,11 @@
-﻿with open('README.md', 'r', encoding='utf-8') as f:
+with open('README.md', 'r', encoding='utf-8') as f:
     text = f.read()
 
 import re
 
 old_struct = re.search(r'## Struttura del progetto.*?`(.*?)`', text, re.DOTALL)
 if old_struct:
-    new_structure = \"\"\"
+    new_structure = """
 ## Struttura del progetto
 `	ext
 C:\...\CDS_Tool\
@@ -33,7 +33,7 @@ Inoltre:
 - È subentrata una fortissima politica di normalizzazione stringhe: staffette che variavano da provincia a provincia ("4X100" vs "4 x 100") vengono unificate alla fonte, prevenendo lo sdoppiamento illecito delle staffette conteggiate dalle graduatorie HTML.
 - L'assegnazione DFS evita i vicoli ciechi normativi permettendo spostamenti fluidi delle atlete laddove incastrate su limiti (es. 2 individuali vs 1 individuale+staffetta).
 - L'interfaccia UI demanda la ricerca ottimale interamente al server Python.
-\"\"\"
+"""
     text = text.replace(old_struct.group(0), new_structure.strip())
     
 with open('README.md', 'w', encoding='utf-8') as f:

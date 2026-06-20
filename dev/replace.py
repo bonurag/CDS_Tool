@@ -4,7 +4,7 @@ with open('fidal_cds_tool.py', 'r', encoding='utf-8') as f:
     text = f.read()
 
 new_str = '''def _opt_assign_best(by_ev, ev_sub, dbl_set, incl_staff, n_sel, max_athl_ind):
-    \"\"\"Backtracking DFS for optimal assignment to avoid greedy limits e incastri ciechi.\"\"\"
+    """Backtracking DFS for optimal assignment to avoid greedy limits e incastri ciechi."""
     ev_cap = {ev: (2 if ev in dbl_set else 1) for ev in ev_sub}
     sel_staff = []
     ac_total = {}
